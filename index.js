@@ -215,12 +215,38 @@ app.get('/torrent/:id', (req, res) => {
     return res.status(404).json({ error: 'Torrent not found' });
   }
   
-  res.json(torrent);
+  // Clean torrent data to avoid circular references
+  const cleanTorrent = {
+    id: torrent.id,
+    magnetURI: torrent.magnetURI,
+    name: torrent.name,
+    status: torrent.status,
+    progress: torrent.progress,
+    downloadSpeed: torrent.downloadSpeed,
+    files: torrent.files,
+    addedAt: torrent.addedAt,
+    serverPort: torrent.serverPort,
+    error: torrent.error || null
+  };
+  
+  res.json(cleanTorrent);
 });
 
 // List all torrents
 app.get('/torrents', (req, res) => {
-  const torrents = Array.from(activeTorrents.values());
+  const torrents = Array.from(activeTorrents.values()).map(torrent => ({
+    id: torrent.id,
+    magnetURI: torrent.magnetURI,
+    name: torrent.name,
+    status: torrent.status,
+    progress: torrent.progress,
+    downloadSpeed: torrent.downloadSpeed,
+    files: torrent.files,
+    addedAt: torrent.addedAt,
+    serverPort: torrent.serverPort,
+    error: torrent.error || null
+  }));
+  
   res.json(torrents);
 });
 
