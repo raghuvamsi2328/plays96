@@ -24,4 +24,4 @@ RUN mkdir -p /app/downloads
 
 EXPOSE 6991
 
-CMD ["node", "index.js"]
+CMD ["node", "server.js"]
