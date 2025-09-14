@@ -1,10 +1,15 @@
-const express = require('express');
-const cors = require('cors');
-const morgan = require('morgan');
-const ffmpeg = require('fluent-ffmpeg');
-const WebTorrent = require('webtorrent');
-const path = require('path');
-const fs = require('fs');
+import express from 'express';
+import cors from 'cors';
+import morgan from 'morgan';
+import ffmpeg from 'fluent-ffmpeg';
+import WebTorrent from 'webtorrent';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+
+// Get __dirname equivalent for ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 6991;
@@ -24,7 +29,7 @@ app.use(morgan('combined'));
 app.use(express.json());
 
 // Serve static files (for test interface)
-app.use('/public', express.static('public'));
+app.use('/public', express.static(path.join(__dirname, 'public')));
 
 // WebTorrent client
 const client = new WebTorrent({
@@ -83,7 +88,7 @@ app.post('/add-torrent', async (req, res) => {
 
     // Add torrent to WebTorrent client
     const torrent = client.add(magnetURI, {
-      path: './downloads'
+      path: path.join(__dirname, 'downloads')
     });
 
     const torrentInfo = {
