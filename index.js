@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import ffmpeg from 'fluent-ffmpeg';
-import WebTorrent from 'webtorrent';
+import peerflix from 'peerflix';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -31,39 +31,18 @@ app.use(express.json());
 // Serve static files (for test interface)
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
-// WebTorrent client with error handling
-const client = new WebTorrent({
-  maxConns: 50,  // Reduced connections
-  nodeId: Buffer.alloc(20).fill(1),
-  tracker: {
-    announce: [],
-    getAnnounceOpts() {
-      return { numwant: 25 }
-    }
-  },
-  dht: false,    // Disable DHT in container
-  lsd: false,    // Disable local service discovery
-  natUpnp: false, // Disable UPnP
-  webSeeds: false // Disable web seeds
-});
+// PeerFlix engines storage
+const activeTorrents = new Map();
 
-// Add global error handlers for WebTorrent
-client.on('error', (err) => {
-  console.error('WebTorrent client error:', err);
-});
-
+// Global error handlers
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
   console.error('Stack:', err.stack);
-  // Don't exit, just log
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  // Don't exit, just log
 });
-
-const activeTorrents = new Map();
 
 // Configure FFmpeg path (should be available in container)
 ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
@@ -84,7 +63,6 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     timestamp: new Date().toISOString(),
     activeTorrents: activeTorrents.size,
-    clientTorrents: client.torrents.length,
     memory: process.memoryUsage(),
     uptime: process.uptime()
   });
@@ -98,15 +76,13 @@ app.get('/debug', (req, res) => {
     status: t.status,
     progress: t.progress,
     filesCount: t.files.length,
-    error: t.error || null
+    error: t.error || null,
+    serverPort: t.serverPort || null
   }));
   
   res.json({
     activeTorrents: torrents,
-    clientTorrents: client.torrents.length,
-    clientRatio: client.ratio,
-    clientDownloadSpeed: client.downloadSpeed,
-    clientUploadSpeed: client.uploadSpeed
+    totalTorrents: activeTorrents.size
   });
 });
 
@@ -119,7 +95,7 @@ app.post('/add-torrent', async (req, res) => {
       return res.status(400).json({ error: 'Magnet URI is required' });
     }
 
-    console.log('Adding torrent:', magnetURI.slice(0, 100) + '...');
+    console.log('Adding torrent with PeerFlix:', magnetURI.slice(0, 100) + '...');
 
     const torrentId = Buffer.from(magnetURI).toString('base64').slice(0, 16);
     
@@ -141,7 +117,8 @@ app.post('/add-torrent', async (req, res) => {
       downloadSpeed: 0,
       files: [],
       addedAt: new Date().toISOString(),
-      webTorrentId: null
+      engine: null,
+      serverPort: null
     };
 
     activeTorrents.set(torrentId, torrentInfo);
@@ -149,75 +126,79 @@ app.post('/add-torrent', async (req, res) => {
     // Send immediate response
     res.json({ torrentId, status: 'adding', torrent: torrentInfo });
 
-    // Add torrent to WebTorrent client asynchronously
-    setTimeout(() => {
-      try {
-        console.log('Creating torrent with WebTorrent...');
-        
-        const torrent = client.add(magnetURI, {
-          path: path.join(__dirname, 'downloads')
-        }, (torrent) => {
-          console.log('Torrent added successfully:', torrent.name);
-          torrentInfo.webTorrentId = torrent.infoHash;
+    // Add torrent with PeerFlix
+    try {
+      console.log('Creating PeerFlix engine...');
+      
+      const engine = peerflix(magnetURI, {
+        connections: 50,
+        uploads: 5,
+        path: path.join(__dirname, 'downloads'),
+        buffer: (1.5 * 1000 * 1000).toString(), // 1.5 MB buffer
+        port: 0 // Let PeerFlix choose port
+      });
+
+      torrentInfo.engine = engine;
+      torrentInfo.status = 'connecting';
+
+      // Handle engine events
+      engine.on('ready', () => {
+        try {
+          console.log('PeerFlix engine ready');
           torrentInfo.status = 'downloading';
-          torrentInfo.name = name || torrent.name;
-        });
+          torrentInfo.name = name || engine.torrent.name || torrentInfo.name;
+          
+          // Map files
+          torrentInfo.files = engine.files.map((file, index) => ({
+            index,
+            name: file.name,
+            path: file.path,
+            size: file.length,
+            offset: file.offset,
+            isVideo: /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(file.name),
+            isAudio: /\.(mp3|flac|wav|aac|ogg|wma)$/i.test(file.name)
+          }));
 
-        // Handle torrent events with error catching
-        torrent.on('metadata', () => {
-          try {
-            console.log(`Torrent metadata received: ${torrent.name}`);
-            torrentInfo.name = name || torrent.name;
-            torrentInfo.status = 'downloading';
-            
-            // Map files from WebTorrent format
-            torrentInfo.files = torrent.files.map((file, index) => ({
-              index,
-              name: file.name,
-              path: file.path,
-              size: file.length,
-              offset: 0,
-              isVideo: /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(file.name),
-              isAudio: /\.(mp3|flac|wav|aac|ogg|wma)$/i.test(file.name)
-            }));
-
-            console.log(`Found ${torrentInfo.files.length} files in torrent`);
-          } catch (err) {
-            console.error('Error processing metadata:', err);
-            torrentInfo.status = 'error';
-          }
-        });
-
-        torrent.on('download', () => {
-          try {
-            torrentInfo.progress = Math.round(torrent.progress * 100);
-            torrentInfo.downloadSpeed = torrent.downloadSpeed;
-          } catch (err) {
-            console.error('Error updating progress:', err);
-          }
-        });
-
-        torrent.on('done', () => {
-          try {
-            torrentInfo.status = 'completed';
-            console.log(`Torrent ${torrentId} completed`);
-          } catch (err) {
-            console.error('Error marking torrent as done:', err);
-          }
-        });
-
-        torrent.on('error', (err) => {
-          console.error(`Torrent ${torrentId} error:`, err);
+          console.log(`Found ${torrentInfo.files.length} files in torrent`);
+        } catch (err) {
+          console.error('Error in ready event:', err);
           torrentInfo.status = 'error';
           torrentInfo.error = err.message;
-        });
+        }
+      });
 
-      } catch (err) {
-        console.error('Error adding torrent to WebTorrent:', err);
+      engine.on('download', () => {
+        try {
+          const swarm = engine.swarm;
+          torrentInfo.progress = Math.round((swarm.downloaded / swarm.size) * 100);
+          torrentInfo.downloadSpeed = swarm.downloadSpeed();
+        } catch (err) {
+          // Ignore progress update errors
+        }
+      });
+
+      engine.on('idle', () => {
+        torrentInfo.status = 'completed';
+        console.log(`Torrent ${torrentId} completed`);
+      });
+
+      engine.on('error', (err) => {
+        console.error(`PeerFlix engine error for ${torrentId}:`, err);
         torrentInfo.status = 'error';
         torrentInfo.error = err.message;
-      }
-    }, 100); // Small delay to ensure response is sent first
+      });
+
+      // Start PeerFlix server
+      engine.server.on('listening', () => {
+        torrentInfo.serverPort = engine.server.address().port;
+        console.log(`PeerFlix server listening on port ${torrentInfo.serverPort}`);
+      });
+
+    } catch (err) {
+      console.error('Error creating PeerFlix engine:', err);
+      torrentInfo.status = 'error';
+      torrentInfo.error = err.message;
+    }
 
   } catch (error) {
     console.error('Error in add-torrent endpoint:', error);
@@ -253,25 +234,21 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
       return res.status(404).json({ error: 'Torrent not found' });
     }
 
-    // Find the WebTorrent instance
-    const torrent = client.torrents.find(t => t.infoHash === torrentInfo.webTorrentId);
-    if (!torrent) {
-      return res.status(404).json({ error: 'Torrent not active in client' });
+    if (!torrentInfo.engine || torrentInfo.status === 'error') {
+      return res.status(404).json({ error: 'Torrent engine not ready' });
     }
 
     let file;
     
     if (fileIndex !== undefined) {
       // Specific file requested
-      file = torrent.files[parseInt(fileIndex)];
+      file = torrentInfo.files[parseInt(fileIndex)];
       if (!file) {
         return res.status(404).json({ error: 'File not found' });
       }
     } else {
       // Auto-select best video file
-      const videoFiles = torrent.files.filter(f => 
-        /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(f.name)
-      );
+      const videoFiles = torrentInfo.files.filter(f => f.isVideo);
       
       if (videoFiles.length === 0) {
         return res.status(404).json({ error: 'No video files found in torrent' });
@@ -296,11 +273,16 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
         if (bPriority !== -1) return 1;
         
         // If neither has priority, sort by file size (largest first)
-        return b.length - a.length;
+        return b.size - a.size;
       })[0];
       
-      console.log(`Auto-selected video file: ${file.name} (${formatBytes(file.length)})`);
+      console.log(`Auto-selected video file: ${file.name} (${formatBytes(file.size)})`);
     }
+
+    // Get the file stream URL from PeerFlix server
+    const streamUrl = `http://localhost:${torrentInfo.serverPort}/${file.index}`;
+    
+    console.log(`Streaming from PeerFlix: ${streamUrl}`);
 
     // Set appropriate headers
     res.setHeader('Content-Type', 'video/mp4');
@@ -309,20 +291,10 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
 
     // Handle range requests for video seeking
     const range = req.headers.range;
-    let start = 0;
-    let end = file.length - 1;
+    let requestOptions = {};
 
     if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      start = parseInt(parts[0], 10);
-      end = parts[1] ? parseInt(parts[1], 10) : file.length - 1;
-      const chunksize = (end - start) + 1;
-
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${file.length}`);
-      res.setHeader('Content-Length', chunksize);
-    } else {
-      res.setHeader('Content-Length', file.length);
+      requestOptions.headers = { Range: range };
     }
 
     // Determine if remuxing is needed
@@ -331,11 +303,8 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
     if (needsRemux) {
       console.log(`Remuxing ${file.name} to MP4`);
       
-      // Create read stream from WebTorrent file
-      const fileStream = file.createReadStream({ start, end });
-      
-      // Create FFmpeg stream
-      const ffmpegStream = ffmpeg(fileStream)
+      // Create FFmpeg stream from PeerFlix URL
+      const ffmpegStream = ffmpeg(streamUrl)
         .format('mp4')
         .videoCodec('copy')  // Copy video stream (no re-encoding)
         .audioCodec('aac')   // Convert audio to AAC if needed
@@ -361,11 +330,24 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
       ffmpegStream.pipe(res, { end: true });
 
     } else {
-      // Direct streaming for compatible formats
+      // Direct streaming for compatible formats - proxy from PeerFlix
       console.log(`Direct streaming ${file.name}`);
       
-      const fileStream = file.createReadStream({ start, end });
-      fileStream.pipe(res);
+      const fetch = (await import('node-fetch')).default;
+      const response = await fetch(streamUrl, requestOptions);
+      
+      // Copy headers from PeerFlix response
+      response.headers.forEach((value, key) => {
+        if (key.toLowerCase() !== 'transfer-encoding') {
+          res.setHeader(key, value);
+        }
+      });
+      
+      // Set status code
+      res.status(response.status);
+      
+      // Pipe the response
+      response.body.pipe(res);
     }
 
   } catch (error) {
@@ -383,10 +365,14 @@ app.delete('/torrent/:id', (req, res) => {
   if (activeTorrents.has(torrentId)) {
     const torrentInfo = activeTorrents.get(torrentId);
     
-    // Remove from WebTorrent client
-    const torrent = client.torrents.find(t => t.infoHash === torrentInfo.webTorrentId);
-    if (torrent) {
-      torrent.destroy();
+    // Destroy PeerFlix engine
+    if (torrentInfo.engine) {
+      try {
+        torrentInfo.engine.destroy();
+        console.log(`PeerFlix engine destroyed for torrent ${torrentId}`);
+      } catch (err) {
+        console.error('Error destroying PeerFlix engine:', err);
+      }
     }
     
     activeTorrents.delete(torrentId);
@@ -404,25 +390,35 @@ app.use((error, req, res, next) => {
 
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Torrent streaming server running on port ${PORT}`);
+  console.log(`Torrent streaming server running on port ${PORT} with PeerFlix`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Debug info: http://localhost:${PORT}/debug`);
   
   // Heartbeat to keep process alive and log status
   setInterval(() => {
-    console.log(`[${new Date().toISOString()}] Server alive - Active torrents: ${activeTorrents.size}, Client torrents: ${client.torrents.length}`);
+    console.log(`[${new Date().toISOString()}] Server alive - Active torrents: ${activeTorrents.size}`);
   }, 30000); // Every 30 seconds
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Shutting down gracefully...');
-  client.destroy();
+  // Destroy all PeerFlix engines
+  activeTorrents.forEach((torrent) => {
+    if (torrent.engine) {
+      torrent.engine.destroy();
+    }
+  });
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
-  client.destroy();
+  // Destroy all PeerFlix engines
+  activeTorrents.forEach((torrent) => {
+    if (torrent.engine) {
+      torrent.engine.destroy();
+    }
+  });
   process.exit(0);
 });
