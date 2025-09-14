@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const ffmpeg = require('fluent-ffmpeg');
-const lt = require('libtorrent');
+const WebTorrent = require('webtorrent');
 const path = require('path');
 const fs = require('fs');
 
@@ -26,13 +26,22 @@ app.use(express.json());
 // Serve static files (for test interface)
 app.use('/public', express.static('public'));
 
-// LibTorrent session
-const session = new lt.session();
+// WebTorrent client
+const client = new WebTorrent({
+  maxConns: 100,
+  nodeId: Buffer.alloc(20).fill(1),
+  tracker: {
+    announce: [],
+    getAnnounceOpts() {
+      return { numwant: 50 }
+    }
+  }
+});
 const activeTorrents = new Map();
 
 // Configure FFmpeg path (should be available in container)
-ffmpeg.setFfmpegPath('/usr/local/bin/ffmpeg');
-ffmpeg.setFfprobePath('/usr/local/bin/ffprobe');
+ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+ffmpeg.setFfprobePath('/usr/bin/ffprobe');
 
 // Test FFmpeg availability
 ffmpeg.getAvailableFormats((err, formats) => {
@@ -72,51 +81,55 @@ app.post('/add-torrent', async (req, res) => {
       });
     }
 
-    // Add torrent to session
-    const torrent = session.add_torrent({
-      url: magnetURI,
-      save_path: './downloads',
-      name: name || `torrent_${torrentId}`
+    // Add torrent to WebTorrent client
+    const torrent = client.add(magnetURI, {
+      path: './downloads'
     });
 
     const torrentInfo = {
       id: torrentId,
       magnetURI,
-      name: name || `torrent_${torrentId}`,
+      name: name || torrent.name || `torrent_${torrentId}`,
       status: 'downloading',
       progress: 0,
       downloadSpeed: 0,
       files: [],
-      addedAt: new Date().toISOString()
+      addedAt: new Date().toISOString(),
+      webTorrentId: torrent.infoHash
     };
 
     activeTorrents.set(torrentId, torrentInfo);
 
     // Handle torrent events
-    torrent.on('progress', (progress) => {
-      torrentInfo.progress = Math.round(progress * 100);
+    torrent.on('metadata', () => {
+      console.log(`Torrent metadata received: ${torrent.name}`);
+      torrentInfo.name = name || torrent.name;
+      
+      // Map files from WebTorrent format
+      torrentInfo.files = torrent.files.map((file, index) => ({
+        index,
+        name: file.name,
+        path: file.path,
+        size: file.length,
+        offset: 0, // WebTorrent doesn't expose offset directly
+        isVideo: /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(file.name),
+        isAudio: /\.(mp3|flac|wav|aac|ogg|wma)$/i.test(file.name)
+      }));
     });
 
-    torrent.on('download', (bytesDownloaded, totalBytes) => {
-      torrentInfo.downloadSpeed = bytesDownloaded;
+    torrent.on('download', () => {
+      torrentInfo.progress = Math.round(torrent.progress * 100);
+      torrentInfo.downloadSpeed = torrent.downloadSpeed;
     });
 
-    torrent.on('finished', () => {
+    torrent.on('done', () => {
       torrentInfo.status = 'completed';
       console.log(`Torrent ${torrentId} completed`);
     });
 
-    torrent.on('metadata', () => {
-      // Get file list when metadata is available
-      const files = torrent.torrent_file().files();
-      torrentInfo.files = files.map((file, index) => ({
-        index,
-        name: file.path,
-        size: file.size,
-        offset: file.offset,
-        isVideo: /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(file.path),
-        isAudio: /\.(mp3|flac|wav|aac|ogg|wma)$/i.test(file.path)
-      }));
+    torrent.on('error', (err) => {
+      console.error(`Torrent ${torrentId} error:`, err);
+      torrentInfo.status = 'error';
     });
 
     res.json({ torrentId, status: 'added', torrent: torrentInfo });
@@ -149,10 +162,16 @@ app.get('/torrents', (req, res) => {
 app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
   try {
     const { torrentId, fileIndex } = req.params;
-    const torrent = activeTorrents.get(torrentId);
+    const torrentInfo = activeTorrents.get(torrentId);
     
-    if (!torrent) {
+    if (!torrentInfo) {
       return res.status(404).json({ error: 'Torrent not found' });
+    }
+
+    // Find the WebTorrent instance
+    const torrent = client.torrents.find(t => t.infoHash === torrentInfo.webTorrentId);
+    if (!torrent) {
+      return res.status(404).json({ error: 'Torrent not active in client' });
     }
 
     let file;
@@ -165,7 +184,9 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
       }
     } else {
       // Auto-select best video file
-      const videoFiles = torrent.files.filter(f => f.isVideo);
+      const videoFiles = torrent.files.filter(f => 
+        /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(f.name)
+      );
       
       if (videoFiles.length === 0) {
         return res.status(404).json({ error: 'No video files found in torrent' });
@@ -190,22 +211,10 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
         if (bPriority !== -1) return 1;
         
         // If neither has priority, sort by file size (largest first)
-        return b.size - a.size;
+        return b.length - a.length;
       })[0];
       
-      console.log(`Auto-selected video file: ${file.name} (${formatBytes(file.size)})`);
-    }
-
-    const filePath = path.join('./downloads', torrent.name, file.name);
-    
-    // Check if file exists and has some content
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'File not yet available' });
-    }
-
-    const stats = fs.statSync(filePath);
-    if (stats.size === 0) {
-      return res.status(425).json({ error: 'File is still downloading' });
+      console.log(`Auto-selected video file: ${file.name} (${formatBytes(file.length)})`);
     }
 
     // Set appropriate headers
@@ -215,15 +224,20 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
 
     // Handle range requests for video seeking
     const range = req.headers.range;
+    let start = 0;
+    let end = file.length - 1;
+
     if (range) {
       const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
+      start = parseInt(parts[0], 10);
+      end = parts[1] ? parseInt(parts[1], 10) : file.length - 1;
       const chunksize = (end - start) + 1;
 
       res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${stats.size}`);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${file.length}`);
       res.setHeader('Content-Length', chunksize);
+    } else {
+      res.setHeader('Content-Length', file.length);
     }
 
     // Determine if remuxing is needed
@@ -232,8 +246,11 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
     if (needsRemux) {
       console.log(`Remuxing ${file.name} to MP4`);
       
+      // Create read stream from WebTorrent file
+      const fileStream = file.createReadStream({ start, end });
+      
       // Create FFmpeg stream
-      const ffmpegStream = ffmpeg(filePath)
+      const ffmpegStream = ffmpeg(fileStream)
         .format('mp4')
         .videoCodec('copy')  // Copy video stream (no re-encoding)
         .audioCodec('aac')   // Convert audio to AAC if needed
@@ -262,17 +279,8 @@ app.get('/stream/:torrentId/:fileIndex?', async (req, res) => {
       // Direct streaming for compatible formats
       console.log(`Direct streaming ${file.name}`);
       
-      if (range) {
-        const parts = range.replace(/bytes=/, "").split("-");
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : stats.size - 1;
-        
-        const stream = fs.createReadStream(filePath, { start, end });
-        stream.pipe(res);
-      } else {
-        const stream = fs.createReadStream(filePath);
-        stream.pipe(res);
-      }
+      const fileStream = file.createReadStream({ start, end });
+      fileStream.pipe(res);
     }
 
   } catch (error) {
@@ -288,7 +296,14 @@ app.delete('/torrent/:id', (req, res) => {
   const torrentId = req.params.id;
   
   if (activeTorrents.has(torrentId)) {
-    // TODO: Remove from libtorrent session
+    const torrentInfo = activeTorrents.get(torrentId);
+    
+    // Remove from WebTorrent client
+    const torrent = client.torrents.find(t => t.infoHash === torrentInfo.webTorrentId);
+    if (torrent) {
+      torrent.destroy();
+    }
+    
     activeTorrents.delete(torrentId);
     res.json({ message: 'Torrent removed' });
   } else {
@@ -311,12 +326,12 @@ app.listen(PORT, '0.0.0.0', () => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('Shutting down gracefully...');
-  session.destroy();
+  client.destroy();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
-  session.destroy();
+  client.destroy();
   process.exit(0);
 });

@@ -1,18 +1,12 @@
-# Use Node.js image with FFmpeg pre-installed
-FROM linuxserver/ffmpeg:latest as ffmpeg
+# Use Node.js image
 FROM node:18-alpine
 
-# Copy FFmpeg from the ffmpeg image
-COPY --from=ffmpeg /usr/local /usr/local
-COPY --from=ffmpeg /usr/lib/lib* /usr/lib/
-
-# Install additional dependencies
+# Install FFmpeg and basic build tools
 RUN apk add --no-cache \
+    ffmpeg \
     python3 \
     make \
-    g++ \
-    libtorrent-dev \
-    boost-dev
+    g++
 
 WORKDIR /app
 
@@ -28,6 +22,6 @@ COPY . .
 # Create downloads directory
 RUN mkdir -p /app/downloads
 
-EXPOSE 3000
+EXPOSE 6991
 
 CMD ["node", "index.js"]

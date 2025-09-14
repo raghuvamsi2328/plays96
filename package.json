@@ -10,7 +10,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "fluent-ffmpeg": "^2.1.2",
-    "libtorrent": "^0.15.10",
+    "webtorrent": "^2.0.0",
     "cors": "^2.8.5",
     "morgan": "^1.10.0"
   },
