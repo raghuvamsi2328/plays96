@@ -31,17 +31,38 @@ app.use(express.json());
 // Serve static files (for test interface)
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
-// WebTorrent client
+// WebTorrent client with error handling
 const client = new WebTorrent({
-  maxConns: 100,
+  maxConns: 50,  // Reduced connections
   nodeId: Buffer.alloc(20).fill(1),
   tracker: {
     announce: [],
     getAnnounceOpts() {
-      return { numwant: 50 }
+      return { numwant: 25 }
     }
-  }
+  },
+  dht: false,    // Disable DHT in container
+  lsd: false,    // Disable local service discovery
+  natUpnp: false, // Disable UPnP
+  webSeeds: false // Disable web seeds
 });
+
+// Add global error handlers for WebTorrent
+client.on('error', (err) => {
+  console.error('WebTorrent client error:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  console.error('Stack:', err.stack);
+  // Don't exit, just log
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit, just log
+});
+
 const activeTorrents = new Map();
 
 // Configure FFmpeg path (should be available in container)
@@ -62,7 +83,30 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     timestamp: new Date().toISOString(),
-    activeTorrents: activeTorrents.size
+    activeTorrents: activeTorrents.size,
+    clientTorrents: client.torrents.length,
+    memory: process.memoryUsage(),
+    uptime: process.uptime()
+  });
+});
+
+// Debug endpoint to see server logs
+app.get('/debug', (req, res) => {
+  const torrents = Array.from(activeTorrents.values()).map(t => ({
+    id: t.id,
+    name: t.name,
+    status: t.status,
+    progress: t.progress,
+    filesCount: t.files.length,
+    error: t.error || null
+  }));
+  
+  res.json({
+    activeTorrents: torrents,
+    clientTorrents: client.torrents.length,
+    clientRatio: client.ratio,
+    clientDownloadSpeed: client.downloadSpeed,
+    clientUploadSpeed: client.uploadSpeed
   });
 });
 
@@ -75,6 +119,8 @@ app.post('/add-torrent', async (req, res) => {
       return res.status(400).json({ error: 'Magnet URI is required' });
     }
 
+    console.log('Adding torrent:', magnetURI.slice(0, 100) + '...');
+
     const torrentId = Buffer.from(magnetURI).toString('base64').slice(0, 16);
     
     // Check if torrent is already active
@@ -86,61 +132,95 @@ app.post('/add-torrent', async (req, res) => {
       });
     }
 
-    // Add torrent to WebTorrent client
-    const torrent = client.add(magnetURI, {
-      path: path.join(__dirname, 'downloads')
-    });
-
     const torrentInfo = {
       id: torrentId,
       magnetURI,
-      name: name || torrent.name || `torrent_${torrentId}`,
-      status: 'downloading',
+      name: name || `torrent_${torrentId}`,
+      status: 'adding',
       progress: 0,
       downloadSpeed: 0,
       files: [],
       addedAt: new Date().toISOString(),
-      webTorrentId: torrent.infoHash
+      webTorrentId: null
     };
 
     activeTorrents.set(torrentId, torrentInfo);
 
-    // Handle torrent events
-    torrent.on('metadata', () => {
-      console.log(`Torrent metadata received: ${torrent.name}`);
-      torrentInfo.name = name || torrent.name;
-      
-      // Map files from WebTorrent format
-      torrentInfo.files = torrent.files.map((file, index) => ({
-        index,
-        name: file.name,
-        path: file.path,
-        size: file.length,
-        offset: 0, // WebTorrent doesn't expose offset directly
-        isVideo: /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(file.name),
-        isAudio: /\.(mp3|flac|wav|aac|ogg|wma)$/i.test(file.name)
-      }));
-    });
+    // Send immediate response
+    res.json({ torrentId, status: 'adding', torrent: torrentInfo });
 
-    torrent.on('download', () => {
-      torrentInfo.progress = Math.round(torrent.progress * 100);
-      torrentInfo.downloadSpeed = torrent.downloadSpeed;
-    });
+    // Add torrent to WebTorrent client asynchronously
+    setTimeout(() => {
+      try {
+        console.log('Creating torrent with WebTorrent...');
+        
+        const torrent = client.add(magnetURI, {
+          path: path.join(__dirname, 'downloads')
+        }, (torrent) => {
+          console.log('Torrent added successfully:', torrent.name);
+          torrentInfo.webTorrentId = torrent.infoHash;
+          torrentInfo.status = 'downloading';
+          torrentInfo.name = name || torrent.name;
+        });
 
-    torrent.on('done', () => {
-      torrentInfo.status = 'completed';
-      console.log(`Torrent ${torrentId} completed`);
-    });
+        // Handle torrent events with error catching
+        torrent.on('metadata', () => {
+          try {
+            console.log(`Torrent metadata received: ${torrent.name}`);
+            torrentInfo.name = name || torrent.name;
+            torrentInfo.status = 'downloading';
+            
+            // Map files from WebTorrent format
+            torrentInfo.files = torrent.files.map((file, index) => ({
+              index,
+              name: file.name,
+              path: file.path,
+              size: file.length,
+              offset: 0,
+              isVideo: /\.(mp4|avi|mkv|mov|wmv|flv|webm)$/i.test(file.name),
+              isAudio: /\.(mp3|flac|wav|aac|ogg|wma)$/i.test(file.name)
+            }));
 
-    torrent.on('error', (err) => {
-      console.error(`Torrent ${torrentId} error:`, err);
-      torrentInfo.status = 'error';
-    });
+            console.log(`Found ${torrentInfo.files.length} files in torrent`);
+          } catch (err) {
+            console.error('Error processing metadata:', err);
+            torrentInfo.status = 'error';
+          }
+        });
 
-    res.json({ torrentId, status: 'added', torrent: torrentInfo });
+        torrent.on('download', () => {
+          try {
+            torrentInfo.progress = Math.round(torrent.progress * 100);
+            torrentInfo.downloadSpeed = torrent.downloadSpeed;
+          } catch (err) {
+            console.error('Error updating progress:', err);
+          }
+        });
+
+        torrent.on('done', () => {
+          try {
+            torrentInfo.status = 'completed';
+            console.log(`Torrent ${torrentId} completed`);
+          } catch (err) {
+            console.error('Error marking torrent as done:', err);
+          }
+        });
+
+        torrent.on('error', (err) => {
+          console.error(`Torrent ${torrentId} error:`, err);
+          torrentInfo.status = 'error';
+          torrentInfo.error = err.message;
+        });
+
+      } catch (err) {
+        console.error('Error adding torrent to WebTorrent:', err);
+        torrentInfo.status = 'error';
+        torrentInfo.error = err.message;
+      }
+    }, 100); // Small delay to ensure response is sent first
 
   } catch (error) {
-    console.error('Error adding torrent:', error);
+    console.error('Error in add-torrent endpoint:', error);
     res.status(500).json({ error: 'Failed to add torrent', details: error.message });
   }
 });
@@ -326,6 +406,12 @@ app.use((error, req, res, next) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Torrent streaming server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Debug info: http://localhost:${PORT}/debug`);
+  
+  // Heartbeat to keep process alive and log status
+  setInterval(() => {
+    console.log(`[${new Date().toISOString()}] Server alive - Active torrents: ${activeTorrents.size}, Client torrents: ${client.torrents.length}`);
+  }, 30000); // Every 30 seconds
 });
 
 // Graceful shutdown
