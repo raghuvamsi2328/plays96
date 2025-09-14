@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  torrent-server:
+    build: .
+    ports:
+      - "6991:6991"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - PORT=6991
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6991/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.torrent.rule=Host(`torrent.yourdomain.com`)"
+      - "traefik.http.services.torrent.loadbalancer.server.port=6991"
