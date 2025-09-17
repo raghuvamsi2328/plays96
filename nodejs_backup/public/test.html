@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torrent Streaming Server Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 10px;
+            border-left: 4px solid #4facfe;
+        }
+
+        .section h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.8em;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+
+        input, textarea, button {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+        }
+
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
+        }
+
+        button {
+            background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: transform 0.2s ease;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(79, 172, 254, 0.3);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status {
+            background: #e8f5e8;
+            border: 1px solid #4caf50;
+            color: #2e7d32;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            display: none;
+        }
+
+        .error {
+            background: #ffebee;
+            border: 1px solid #f44336;
+            color: #c62828;
+        }
+
+        .torrent-item {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .torrent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .torrent-name {
+            font-weight: 600;
+            font-size: 1.2em;
+            color: #333;
+        }
+
+        .torrent-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-downloading {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-completed {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 10px;
+            background: #eee;
+            border-radius: 5px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4facfe, #00f2fe);
+            transition: width 0.3s ease;
+        }
+
+        .file-list {
+            margin-top: 15px;
+        }
+
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+
+        .file-info {
+            flex: 1;
+        }
+
+        .file-name {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .file-size {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .stream-button {
+            padding: 8px 16px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-left: 10px;
+        }
+
+        .stream-button:hover {
+            background: #218838;
+        }
+
+        .video-player {
+            width: 100%;
+            max-width: 800px;
+            margin: 20px auto;
+            display: block;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4facfe;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Torrent Streaming Server</h1>
+            <p>Test interface for LibTorrent + FFmpeg streaming</p>
+        </div>
+
+        <div class="content">
+            <div class="grid">
+                <!-- Add Torrent Section -->
+                <div class="section">
+                    <h2>📥 Add Torrent</h2>
+                    <form id="addTorrentForm">
+                        <div class="form-group">
+                            <label for="magnetUri">Magnet URI:</label>
+                            <textarea id="magnetUri" placeholder="magnet:?xt=urn:btih:..." rows="3" required></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="torrentName">Name (optional):</label>
+                            <input type="text" id="torrentName" placeholder="My Movie">
+                        </div>
+                        <button type="submit" id="addButton">
+                            <span id="addButtonText">Add Torrent</span>
+                            <span id="addButtonLoading" class="loading" style="display: none;"></span>
+                        </button>
+                    </form>
+                    <div id="addStatus" class="status"></div>
+                </div>
+
+                <!-- Server Status Section -->
+                <div class="section">
+                    <h2>📊 Server Status</h2>
+                    <button onclick="checkHealth()" id="healthButton">Check Health</button>
+                    <div id="healthStatus" class="status"></div>
+                    
+                    <div style="margin-top: 20px;">
+                        <button onclick="loadTorrents()" id="loadButton">Refresh Torrents</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active Torrents Section -->
+            <div class="section">
+                <h2>📋 Active Torrents</h2>
+                <div id="torrentsList">
+                    <p style="text-align: center; color: #666; padding: 20px;">
+                        No torrents loaded. Click "Refresh Torrents" to load active torrents.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Video Player Section -->
+            <div class="section" id="playerSection" style="display: none;">
+                <h2>🎬 Video Player</h2>
+                <video id="videoPlayer" class="video-player" controls>
+                    Your browser does not support the video tag.
+                </video>
+                <p style="text-align: center; margin-top: 10px; color: #666;">
+                    <span id="nowPlaying">No video selected</span>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        let refreshInterval;
+
+        // Add torrent form handler
+        document.getElementById('addTorrentForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const magnetUri = document.getElementById('magnetUri').value.trim();
+            const torrentName = document.getElementById('torrentName').value.trim();
+            const addButton = document.getElementById('addButton');
+            const addButtonText = document.getElementById('addButtonText');
+            const addButtonLoading = document.getElementById('addButtonLoading');
+            const statusDiv = document.getElementById('addStatus');
+
+            if (!magnetUri) {
+                showStatus(statusDiv, 'Please enter a magnet URI', 'error');
+                return;
+            }
+
+            // Show loading state
+            addButton.disabled = true;
+            addButtonText.style.display = 'none';
+            addButtonLoading.style.display = 'inline-block';
+
+            try {
+                const response = await fetch(`${API_BASE}/add-torrent`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        magnetURI: magnetUri,
+                        name: torrentName || undefined
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    showStatus(statusDiv, `Torrent added successfully! ID: ${result.torrentId}`, 'success');
+                    document.getElementById('addTorrentForm').reset();
+                    setTimeout(() => loadTorrents(), 1000);
+                } else {
+                    showStatus(statusDiv, `Error: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(statusDiv, `Network error: ${error.message}`, 'error');
+            } finally {
+                // Hide loading state
+                addButton.disabled = false;
+                addButtonText.style.display = 'inline';
+                addButtonLoading.style.display = 'none';
+            }
+        });
+
+        // Check server health
+        async function checkHealth() {
+            const button = document.getElementById('healthButton');
+            const statusDiv = document.getElementById('healthStatus');
+            
+            button.disabled = true;
+            button.textContent = 'Checking...';
+
+            try {
+                const response = await fetch(`${API_BASE}/health`);
+                const result = await response.json();
+
+                if (response.ok) {
+                    showStatus(statusDiv, 
+                        `Server is healthy! Active torrents: ${result.activeTorrents}`, 
+                        'success'
+                    );
+                } else {
+                    showStatus(statusDiv, 'Server health check failed', 'error');
+                }
+            } catch (error) {
+                showStatus(statusDiv, `Cannot connect to server: ${error.message}`, 'error');
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Check Health';
+            }
+        }
+
+        // Load active torrents
+        async function loadTorrents() {
+            const button = document.getElementById('loadButton');
+            const torrentsList = document.getElementById('torrentsList');
+            
+            button.disabled = true;
+            button.textContent = 'Loading...';
+
+            try {
+                const response = await fetch(`${API_BASE}/torrents`);
+                const torrents = await response.json();
+
+                if (response.ok) {
+                    displayTorrents(torrents);
+                    // Auto-refresh every 5 seconds
+                    if (torrents.length > 0) {
+                        startAutoRefresh();
+                    }
+                } else {
+                    torrentsList.innerHTML = '<p style="color: #c62828;">Failed to load torrents</p>';
+                }
+            } catch (error) {
+                torrentsList.innerHTML = `<p style="color: #c62828;">Error: ${error.message}</p>`;
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Refresh Torrents';
+            }
+        }
+
+        // Display torrents
+        function displayTorrents(torrents) {
+            const torrentsList = document.getElementById('torrentsList');
+            
+            if (torrents.length === 0) {
+                torrentsList.innerHTML = '<p style="text-align: center; color: #666;">No active torrents</p>';
+                return;
+            }
+
+            torrentsList.innerHTML = torrents.map(torrent => `
+                <div class="torrent-item">
+                    <div class="torrent-header">
+                        <div class="torrent-name">${escapeHtml(torrent.name)}</div>
+                        <div class="torrent-status status-${torrent.status}">${torrent.status}</div>
+                    </div>
+                    
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: ${torrent.progress}%"></div>
+                    </div>
+                    <div style="text-align: center; margin: 5px 0; font-size: 0.9em; color: #666;">
+                        Progress: ${torrent.progress}% | Speed: ${formatSpeed(torrent.downloadSpeed)}
+                    </div>
+
+                    ${torrent.files && torrent.files.length > 0 ? `
+                        <div style="margin-bottom: 15px; text-align: center;">
+                            <button class="stream-button" onclick="autoStreamTorrent('${torrent.id}', '${escapeHtml(torrent.name)}')" 
+                                    style="background: #007bff; font-size: 1.1em; padding: 12px 24px;">
+                                🎬 Auto Stream Best Video
+                            </button>
+                        </div>
+                        <div class="file-list">
+                            <h4>All Files:</h4>
+                            ${torrent.files.map((file, index) => `
+                                <div class="file-item">
+                                    <div class="file-info">
+                                        <div class="file-name">${escapeHtml(file.name)}</div>
+                                        <div class="file-size">${formatBytes(file.size)}</div>
+                                    </div>
+                                    ${file.isVideo ? `
+                                        <button class="stream-button" onclick="streamFile('${torrent.id}', ${index}, '${escapeHtml(file.name)}')">
+                                            🎬 Stream
+                                        </button>
+                                    ` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : '<p style="color: #666; font-style: italic;">Files will appear when metadata is loaded...</p>'}
+
+                    <div style="margin-top: 15px; text-align: right;">
+                        <button onclick="removeTorrent('${torrent.id}')" style="background: #dc3545; padding: 8px 16px;">
+                            🗑️ Remove
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Stream file
+        function streamFile(torrentId, fileIndex, fileName) {
+            const streamUrl = `${API_BASE}/stream/${torrentId}/${fileIndex}`;
+            const videoPlayer = document.getElementById('videoPlayer');
+            const playerSection = document.getElementById('playerSection');
+            const nowPlaying = document.getElementById('nowPlaying');
+
+            videoPlayer.src = streamUrl;
+            nowPlaying.textContent = `Now playing: ${fileName}`;
+            playerSection.style.display = 'block';
+            
+            // Scroll to player
+            playerSection.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Auto-stream best video file
+        function autoStreamTorrent(torrentId, torrentName) {
+            const streamUrl = `${API_BASE}/stream/${torrentId}`;
+            const videoPlayer = document.getElementById('videoPlayer');
+            const playerSection = document.getElementById('playerSection');
+            const nowPlaying = document.getElementById('nowPlaying');
+
+            videoPlayer.src = streamUrl;
+            nowPlaying.textContent = `Auto-streaming: ${torrentName} (best video file selected automatically)`;
+            playerSection.style.display = 'block';
+            
+            // Scroll to player
+            playerSection.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Remove torrent
+        async function removeTorrent(torrentId) {
+            if (!confirm('Are you sure you want to remove this torrent?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/torrent/${torrentId}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    loadTorrents();
+                } else {
+                    alert('Failed to remove torrent');
+                }
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        }
+
+        // Auto-refresh torrents
+        function startAutoRefresh() {
+            if (refreshInterval) clearInterval(refreshInterval);
+            refreshInterval = setInterval(loadTorrents, 5000);
+        }
+
+        // Utility functions
+        function showStatus(element, message, type) {
+            element.textContent = message;
+            element.className = `status ${type === 'error' ? 'error' : ''}`;
+            element.style.display = 'block';
+            
+            setTimeout(() => {
+                element.style.display = 'none';
+            }, 5000);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatSpeed(bytesPerSecond) {
+            return formatBytes(bytesPerSecond) + '/s';
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            checkHealth();
+        });
+
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) clearInterval(refreshInterval);
+        });
+    </script>
+</body>
+</html>
