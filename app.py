@@ -248,51 +248,110 @@ async def stream_file(torrent_id: str, file_index: int, request: Request):
     file_entry = lt_info.file_at(file_index)
     file_path = os.path.join(DOWNLOAD_PATH, file_entry.path)
     
-    # Ensure file path is ready
+    # Prioritize the start of the file for streaming
     handle = torrent_info["handle"]
-    handle.set_piece_deadline(lt_info.map_file(file_index, 0, 10).piece, 1000)
+    start_piece, _ = lt_info.map_file(file_index, 0, 1)
+    handle.set_piece_deadline(start_piece, 1000) # High priority for the first piece
 
     # Wait for the file to be created by libtorrent
-    for _ in range(10):
+    for _ in range(15): # Wait up to 15 seconds
         if os.path.exists(file_path):
             break
         await asyncio.sleep(1)
     else:
-        raise HTTPException(status_code=503, detail="File not available for streaming yet")
+        raise HTTPException(status_code=503, detail="File not available for streaming yet. Please wait and try again.")
 
     file_size = file_entry.size
     range_header = request.headers.get('Range')
+    
+    # --- FFmpeg Remuxing Logic ---
+    needs_remux = any(file_entry.path.lower().endswith(ext) for ext in ['.mkv', '.avi', '.wmv', '.flv'])
 
-    async def stream_generator(start, end):
-        """Generator to read and yield file chunks."""
-        with open(file_path, "rb") as f:
-            f.seek(start)
-            chunk_size = 1024 * 1024  # 1MB chunks
-            while (pos := f.tell()) <= end:
-                read_size = min(chunk_size, end - pos + 1)
-                data = f.read(read_size)
-                if not data:
-                    break
-                yield data
-                await asyncio.sleep(0.001) # Yield control to event loop
+    if needs_remux:
+        logging.info(f"Remuxing required for {file_entry.path}")
+        
+        async def remux_stream_generator():
+            ffmpeg_process = await asyncio.create_subprocess_exec(
+                'ffmpeg',
+                '-i', file_path,
+                '-movflags', 'frag_keyframe+empty_moov',
+                '-f', 'mp4',
+                '-vcodec', 'copy',
+                '-acodec', 'aac',
+                '-b:a', '192k',
+                'pipe:1',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            try:
+                while True:
+                    chunk = await ffmpeg_process.stdout.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+                    await asyncio.sleep(0.001)
+            finally:
+                if ffmpeg_process.returncode is None:
+                    ffmpeg_process.kill()
+                await ffmpeg_process.wait()
+                stderr_data = await ffmpeg_process.stderr.read()
+                if ffmpeg_process.returncode != 0:
+                    logging.error(f"FFmpeg error: {stderr_data.decode()}")
 
-    if range_header:
-        start_bytes, end_bytes = range_header.replace('bytes=', '').split('-')
-        start = int(start_bytes)
-        end = int(end_bytes) if end_bytes else file_size - 1
         headers = {
-            'Content-Range': f'bytes {start}-{end}/{file_size}',
-            'Accept-Ranges': 'bytes',
-            'Content-Length': str(end - start + 1),
             'Content-Type': 'video/mp4',
+            'Accept-Ranges': 'bytes', # Seeking is not perfectly supported with live remuxing
+            'Cache-Control': 'no-cache',
         }
-        return StreamingResponse(stream_generator(start, end), status_code=206, headers=headers)
+        return StreamingResponse(remux_stream_generator(), headers=headers)
+
+    # --- Direct File Streaming Logic ---
     else:
-        headers = {
-            'Content-Length': str(file_size),
-            'Content-Type': 'video/mp4',
-        }
-        return StreamingResponse(stream_generator(0, file_size - 1), headers=headers)
+        logging.info(f"Direct streaming for {file_entry.path}")
+        
+        async def direct_stream_generator(start, end):
+            """Generator to read and yield file chunks."""
+            # Give libtorrent a head-start on the requested range
+            start_piece, _ = lt_info.map_file(file_index, start, 1)
+            end_piece, _ = lt_info.map_file(file_index, end, 1)
+            handle.set_piece_deadline(start_piece, 1000)
+            for p in range(start_piece, end_piece + 1):
+                handle.set_piece_deadline(p, 0) # Normal priority for the rest
+
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                chunk_size = 1024 * 1024  # 1MB chunks
+                while (pos := f.tell()) <= end:
+                    read_size = min(chunk_size, end - pos + 1)
+                    data = f.read(read_size)
+                    if not data:
+                        # If we're at the end of the file but not the end of the range,
+                        # it means the file is still downloading. Wait and retry.
+                        if pos < end:
+                            await asyncio.sleep(0.5)
+                            continue
+                        break
+                    yield data
+                    await asyncio.sleep(0.001) # Yield control
+
+        if range_header:
+            start_bytes, end_bytes = range_header.replace('bytes=', '').split('-')
+            start = int(start_bytes)
+            end = int(end_bytes) if end_bytes else file_size - 1
+            headers = {
+                'Content-Range': f'bytes {start}-{end}/{file_size}',
+                'Accept-Ranges': 'bytes',
+                'Content-Length': str(end - start + 1),
+                'Content-Type': 'video/mp4',
+            }
+            return StreamingResponse(direct_stream_generator(start, end), status_code=206, headers=headers)
+        else:
+            headers = {
+                'Content-Length': str(file_size),
+                'Content-Type': 'video/mp4',
+            }
+            return StreamingResponse(direct_stream_generator(0, file_size - 1), headers=headers)
 
 @app.delete("/torrent/{torrent_id}")
 async def remove_torrent(torrent_id: str):

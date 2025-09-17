@@ -8,6 +8,8 @@ WORKDIR /usr/src/app
 # - libtorrent-rasterbar is for the torrent engine
 # - ffmpeg is for video processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
     libtorrent-rasterbar-dev \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
