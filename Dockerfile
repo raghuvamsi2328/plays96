@@ -9,8 +9,10 @@ WORKDIR /usr/src/app
 # - ffmpeg is for video processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    pkg-config \
+    python3-dev \
+    g++ \
     libtorrent-rasterbar-dev \
+    python3-libtorrent \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
