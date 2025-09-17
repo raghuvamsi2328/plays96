@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Link the system-installed libtorrent to the local site-packages directory
+RUN ln -s /usr/lib/python3/dist-packages/libtorrent.so /usr/local/lib/python3.9/site-packages/libtorrent.so
+
 # Copy the requirements file into the container
 COPY requirements.txt ./
 
