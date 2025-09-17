@@ -1,35 +1,28 @@
-# Use Node.js image
-FROM node:18-alpine
+# Use an official Python runtime as a parent image
+FROM python:3.9-slim
 
-# Install FFmpeg and basic build tools
-RUN apk add --no-cache \
+# Set the working directory in the container
+WORKDIR /usr/src/app
+
+# Install system dependencies
+# - libtorrent-rasterbar is for the torrent engine
+# - ffmpeg is for video processing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libtorrent-rasterbar-dev \
     ffmpeg \
-    python3 \
-    make \
-    g++
+    && rm -rf /var/lib/apt/lists/*
 
-# Optimize network settings for better torrent performance
-RUN echo 'net.core.rmem_max = 134217728' >> /etc/sysctl.conf && \
-    echo 'net.core.wmem_max = 134217728' >> /etc/sysctl.conf && \
-    echo 'net.ipv4.tcp_rmem = 4096 87380 134217728' >> /etc/sysctl.conf && \
-    echo 'net.ipv4.tcp_wmem = 4096 65536 134217728' >> /etc/sysctl.conf && \
-    echo 'net.core.netdev_max_backlog = 5000' >> /etc/sysctl.conf
+# Copy the requirements file into the container
+COPY requirements.txt ./
 
-WORKDIR /app
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy package files
-COPY package*.json ./
-
-# Install Node.js dependencies
-RUN npm install
-
-# Copy application code
+# Copy the rest of the application's code
 COPY . .
 
-# Create downloads directory
-RUN mkdir -p /app/downloads
-
+# Make port 6991 available to the world outside this container
 EXPOSE 6991
 
-# Use index.js instead of server.js for the optimized version
-CMD ["node", "index.js"]
+# Run app.py when the container launches
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "6991"]
