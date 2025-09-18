@@ -262,7 +262,7 @@ async def stream_file(torrent_id: str, file_index: int, request: Request):
     
     # Prioritize the start of the file for streaming
     handle = torrent_info["handle"]
-    start_piece, _ = lt_info.map_file(file_index, 0, 1)
+    start_piece = lt_info.map_file(file_index, 0, 1).piece
     handle.set_piece_deadline(start_piece, 1000) # High priority for the first piece
 
     # Wait for the file to be created by libtorrent
@@ -325,8 +325,8 @@ async def stream_file(torrent_id: str, file_index: int, request: Request):
         async def direct_stream_generator(start, end):
             """Generator to read and yield file chunks."""
             # Give libtorrent a head-start on the requested range
-            start_piece, _ = lt_info.map_file(file_index, start, 1)
-            end_piece, _ = lt_info.map_file(file_index, end, 1)
+            start_piece = lt_info.map_file(file_index, start, 1).piece
+            end_piece = lt_info.map_file(file_index, end, 1).piece
             handle.set_piece_deadline(start_piece, 1000)
             for p in range(start_piece, end_piece + 1):
                 handle.set_piece_deadline(p, 0) # Normal priority for the rest
