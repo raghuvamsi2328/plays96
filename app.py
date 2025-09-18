@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -19,6 +20,15 @@ DOWNLOAD_PATH = "downloads"
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
+
+# --- CORS Middleware ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 app.mount("/static", StaticFiles(directory="public"), name="static")
 
 # --- In-memory State ---
