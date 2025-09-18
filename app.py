@@ -4,7 +4,8 @@ import time
 import logging
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 import libtorrent as lt
 from pydantic import BaseModel
@@ -18,6 +19,7 @@ DOWNLOAD_PATH = "downloads"
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="public"), name="static")
 
 # --- In-memory State ---
 active_torrents = {}
@@ -106,8 +108,7 @@ def to_dict(torrent_info):
 async def alert_listener():
     """Listens for and processes libtorrent alerts."""
     while True:
-        alerts = []
-        ses.pop_alerts(alerts)
+        alerts = ses.pop_alerts()
         for alert in alerts:
             if isinstance(alert, lt.metadata_received_alert):
                 h = alert.handle
@@ -364,6 +365,10 @@ async def remove_torrent(torrent_id: str):
         return {"message": "Torrent removed"}
     else:
         raise HTTPException(status_code=404, detail="Torrent not found")
+
+@app.get("/")
+async def read_root():
+    return FileResponse('public/test.html')
 
 # --- Main Execution ---
 if __name__ == "__main__":

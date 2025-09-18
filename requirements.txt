@@ -1,5 +1,6 @@
 fastapi
-uvicorn[standard]
+uvicorn
+libtorrent
 aiofiles
 python-dotenv
 apscheduler
