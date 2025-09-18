@@ -312,9 +312,25 @@ async def stream_file(torrent_id: str, file_index: int, request: Request):
     if needs_remux:
         logging.info(f"Remuxing required for {file_entry.path}")
         
+        start_bytes = 0
+        if range_header:
+            try:
+                start_bytes_str, _ = range_header.replace('bytes=', '').split('-')
+                start_bytes = int(start_bytes_str)
+            except ValueError:
+                start_bytes = 0
+        
+        # Estimate start time for ffmpeg -ss. This is not perfect but allows seeking.
+        # A more robust solution would involve ffprobe, but that adds complexity.
+        # Assuming an average bitrate of 5 Mbit/s for estimation.
+        avg_bitrate_mbps = 5
+        start_time_sec = (start_bytes * 8) / (avg_bitrate_mbps * 1024 * 1024) if start_bytes > 0 else 0
+
+
         async def remux_stream_generator():
-            ffmpeg_process = await asyncio.create_subprocess_exec(
+            ffmpeg_cmd = [
                 'ffmpeg',
+                '-ss', str(start_time_sec), # Seek to estimated time
                 '-i', file_path,
                 '-movflags', 'frag_keyframe+empty_moov',
                 '-f', 'mp4',
@@ -322,6 +338,11 @@ async def stream_file(torrent_id: str, file_index: int, request: Request):
                 '-acodec', 'aac',
                 '-b:a', '192k',
                 'pipe:1',
+            ]
+            logging.info(f"FFmpeg command: {' '.join(ffmpeg_cmd)}")
+            
+            ffmpeg_process = await asyncio.create_subprocess_exec(
+                *ffmpeg_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -341,12 +362,16 @@ async def stream_file(torrent_id: str, file_index: int, request: Request):
                 if ffmpeg_process.returncode != 0:
                     logging.error(f"FFmpeg error: {stderr_data.decode()}")
 
+        status_code = 206 if start_bytes > 0 else 200
         headers = {
             'Content-Type': 'video/mp4',
-            'Accept-Ranges': 'bytes', # Seeking is not perfectly supported with live remuxing
+            'Accept-Ranges': 'bytes',
             'Cache-Control': 'no-cache',
         }
-        return StreamingResponse(remux_stream_generator(), headers=headers)
+        if start_bytes > 0:
+            headers['Content-Range'] = f'bytes {start_bytes}-{file_size-1}/{file_size}'
+
+        return StreamingResponse(remux_stream_generator(), status_code=status_code, headers=headers)
 
     # --- Direct File Streaming Logic ---
     else:
