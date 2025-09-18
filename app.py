@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import libtorrent as lt
@@ -243,6 +243,36 @@ async def add_torrent(req_body: AddTorrentRequest):
         await asyncio.sleep(1)
 
     return {"status": "adding", "torrent": to_dict(torrent_info)}
+
+@app.get("/stream/{torrent_id}")
+async def stream_best_file(torrent_id: str, request: Request):
+    """
+    Automatically finds the largest video file in a torrent and redirects to stream it.
+    """
+    torrent_id = torrent_id.lower()
+    torrent_info = active_torrents.get(torrent_id)
+    if not torrent_info or not torrent_info.get("info"):
+        raise HTTPException(status_code=404, detail="Torrent or metadata not found")
+
+    files = torrent_info.get("files", [])
+    if not files:
+        raise HTTPException(status_code=404, detail="No files found in torrent yet")
+
+    # Find the largest video file
+    best_file = None
+    max_size = -1
+    for file in files:
+        if file.get("isVideo") and file.get("size") > max_size:
+            max_size = file["size"]
+            best_file = file
+
+    if not best_file:
+        raise HTTPException(status_code=404, detail="No streamable video file found in this torrent")
+
+    # Redirect to the actual stream URL for that file
+    file_index = best_file["index"]
+    redirect_url = request.url_for('stream_file', torrent_id=torrent_id, file_index=file_index)
+    return RedirectResponse(url=redirect_url)
 
 @app.get("/stream/{torrent_id}/{file_index}")
 async def stream_file(torrent_id: str, file_index: int, request: Request):
