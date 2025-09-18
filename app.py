@@ -217,11 +217,12 @@ async def add_torrent(req_body: AddTorrentRequest):
         return {"status": "already_active", "torrent": to_dict(active_torrents[torrent_hash])}
 
     magnet_uri = f"magnet:?xt=urn:btih:{torrent_hash}"
-    params = {
+    add_params = {
+        'url': magnet_uri,
         'save_path': DOWNLOAD_PATH,
         'storage_mode': lt.storage_mode_t.storage_mode_sparse,
     }
-    handle = ses.add_torrent({'url': magnet_uri, 'params': params})
+    handle = ses.add_torrent(add_params)
 
     torrent_info = {
         "id": torrent_hash,

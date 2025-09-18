@@ -343,6 +343,17 @@
                 return;
             }
 
+            // Extract hash from magnet URI
+            const hashMatch = magnetUri.match(/btih:([a-fA-F0-9]{40})/);
+            if (!hashMatch) {
+                showStatus(statusDiv, 'Invalid magnet URI. Could not find torrent hash.', 'error');
+                addButton.disabled = false;
+                addButtonText.style.display = 'inline';
+                addButtonLoading.style.display = 'none';
+                return;
+            }
+            const torrentHash = hashMatch[1];
+
             // Show loading state
             addButton.disabled = true;
             addButtonText.style.display = 'none';
@@ -355,7 +366,7 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        magnetURI: magnetUri,
+                        torrentHash: torrentHash,
                         name: torrentName || undefined
                     })
                 });
@@ -363,11 +374,11 @@
                 const result = await response.json();
 
                 if (response.ok) {
-                    showStatus(statusDiv, `Torrent added successfully! ID: ${result.torrentId}`, 'success');
+                    showStatus(statusDiv, `Torrent added successfully! ID: ${result.torrent.id}`, 'success');
                     document.getElementById('addTorrentForm').reset();
                     setTimeout(() => loadTorrents(), 1000);
                 } else {
-                    showStatus(statusDiv, `Error: ${result.error}`, 'error');
+                    showStatus(statusDiv, `Error: ${result.detail || 'Unknown error'}`, 'error');
                 }
             } catch (error) {
                 showStatus(statusDiv, `Network error: ${error.message}`, 'error');
