@@ -61,8 +61,8 @@ def shutdown_event():
 
 
 # --- API Routers ---
-app.include_router(torrents.router, prefix="/api", tags=["torrents"])
-app.include_router(streaming.router, prefix="/api", tags=["streaming"])
+app.include_router(torrents.router, prefix="/api/torrents", tags=["torrents"])
+app.include_router(streaming.router, prefix="/api/stream", tags=["streaming"])
 
 
 # --- Static Files ---
