@@ -323,8 +323,9 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
-        const API_BASE = window.location.origin;
+        const API_BASE = `${window.location.origin}/api`;
         let refreshInterval;
 
         // Add torrent form handler
@@ -332,7 +333,6 @@
             e.preventDefault();
             
             const magnetUri = document.getElementById('magnetUri').value.trim();
-            const torrentName = document.getElementById('torrentName').value.trim();
             const addButton = document.getElementById('addButton');
             const addButtonText = document.getElementById('addButtonText');
             const addButtonLoading = document.getElementById('addButtonLoading');
@@ -343,38 +343,26 @@
                 return;
             }
 
-            // Extract hash from magnet URI
-            const hashMatch = magnetUri.match(/btih:([a-fA-F0-9]{40})/);
-            if (!hashMatch) {
-                showStatus(statusDiv, 'Invalid magnet URI. Could not find torrent hash.', 'error');
-                addButton.disabled = false;
-                addButtonText.style.display = 'inline';
-                addButtonLoading.style.display = 'none';
-                return;
-            }
-            const torrentHash = hashMatch[1];
-
             // Show loading state
             addButton.disabled = true;
             addButtonText.style.display = 'none';
             addButtonLoading.style.display = 'inline-block';
 
             try {
-                const response = await fetch(`${API_BASE}/add-torrent`, {
+                const response = await fetch(`${API_BASE}/torrents/add-torrent`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        torrentHash: torrentHash,
-                        name: torrentName || undefined
+                        magnet_link: magnetUri
                     })
                 });
 
                 const result = await response.json();
 
                 if (response.ok) {
-                    showStatus(statusDiv, `Torrent added successfully! ID: ${result.torrent.id}`, 'success');
+                    showStatus(statusDiv, `Torrent added successfully! ID: ${result.torrent_id}`, 'success');
                     document.getElementById('addTorrentForm').reset();
                     setTimeout(() => loadTorrents(), 1000);
                 } else {
@@ -389,34 +377,6 @@
                 addButtonLoading.style.display = 'none';
             }
         });
-
-        // Check server health
-        async function checkHealth() {
-            const button = document.getElementById('healthButton');
-            const statusDiv = document.getElementById('healthStatus');
-            
-            button.disabled = true;
-            button.textContent = 'Checking...';
-
-            try {
-                const response = await fetch(`${API_BASE}/health`);
-                const result = await response.json();
-
-                if (response.ok) {
-                    showStatus(statusDiv, 
-                        `Server is healthy! Active torrents: ${result.activeTorrents}`, 
-                        'success'
-                    );
-                } else {
-                    showStatus(statusDiv, 'Server health check failed', 'error');
-                }
-            } catch (error) {
-                showStatus(statusDiv, `Cannot connect to server: ${error.message}`, 'error');
-            } finally {
-                button.disabled = false;
-                button.textContent = 'Check Health';
-            }
-        }
 
         // Load active torrents
         async function loadTorrents() {
@@ -433,8 +393,10 @@
                 if (response.ok) {
                     displayTorrents(torrents);
                     // Auto-refresh every 5 seconds
-                    if (torrents.length > 0) {
+                    if (Object.keys(torrents).length > 0) {
                         startAutoRefresh();
+                    } else {
+                        if (refreshInterval) clearInterval(refreshInterval);
                     }
                 } else {
                     torrentsList.innerHTML = '<p style="color: #c62828;">Failed to load torrents</p>';
@@ -450,53 +412,41 @@
         // Display torrents
         function displayTorrents(torrents) {
             const torrentsList = document.getElementById('torrentsList');
+            const torrentArray = Object.values(torrents);
             
-            if (torrents.length === 0) {
+            if (torrentArray.length === 0) {
                 torrentsList.innerHTML = '<p style="text-align: center; color: #666;">No active torrents</p>';
                 return;
             }
 
-            torrentsList.innerHTML = torrents.map(torrent => `
+            torrentsList.innerHTML = torrentArray.map(torrent => `
                 <div class="torrent-item">
                     <div class="torrent-header">
-                        <div class="torrent-name">${escapeHtml(torrent.name)}</div>
-                        <div class="torrent-status status-${torrent.status}">${torrent.status}</div>
+                        <div class="torrent-name" title="${escapeHtml(torrent.name)}">${escapeHtml(torrent.name)}</div>
+                        <div class="torrent-status status-${torrent.status.toLowerCase()}">${torrent.status}</div>
                     </div>
                     
                     <div class="progress-bar">
-                        <div class="progress-fill" style="width: ${torrent.progress}%"></div>
+                        <div class="progress-fill" style="width: ${torrent.progress.toFixed(2)}%"></div>
                     </div>
                     <div style="text-align: center; margin: 5px 0; font-size: 0.9em; color: #666;">
-                        Progress: ${torrent.progress}% | Speed: ${formatSpeed(torrent.downloadSpeed)}
+                        Progress: ${torrent.progress.toFixed(2)}% | DL: ${formatSpeed(torrent.download_rate * 1000)} | UL: ${formatSpeed(torrent.upload_rate * 1000)} | Peers: ${torrent.num_peers}
                     </div>
 
                     ${torrent.files && torrent.files.length > 0 ? `
                         <div style="margin-bottom: 15px; text-align: center;">
-                            <button class="stream-button" onclick="autoStreamTorrent('${torrent.id}', '${escapeHtml(torrent.name)}')" 
+                            <button class="stream-button" onclick="streamTorrent('${torrent.hash}', '${escapeHtml(torrent.name)}')" 
                                     style="background: #007bff; font-size: 1.1em; padding: 12px 24px;">
-                                🎬 Auto Stream Best Video
+                                🎬 Stream Video (HLS)
                             </button>
                         </div>
                         <div class="file-list">
-                            <h4>All Files:</h4>
-                            ${torrent.files.map((file, index) => `
-                                <div class="file-item">
-                                    <div class="file-info">
-                                        <div class="file-name">${escapeHtml(file.name)}</div>
-                                        <div class="file-size">${formatBytes(file.size)}</div>
-                                    </div>
-                                    ${file.isVideo ? `
-                                        <button class="stream-button" onclick="streamFile('${torrent.id}', ${index}, '${escapeHtml(file.name)}')">
-                                            🎬 Stream
-                                        </button>
-                                    ` : ''}
-                                </div>
-                            `).join('')}
+                            <p><strong>Largest Video File:</strong> ${escapeHtml(getLargestVideoFile(torrent.files))}</p>
                         </div>
                     ` : '<p style="color: #666; font-style: italic;">Files will appear when metadata is loaded...</p>'}
 
                     <div style="margin-top: 15px; text-align: right;">
-                        <button onclick="removeTorrent('${torrent.id}')" style="background: #dc3545; padding: 8px 16px;">
+                        <button onclick="removeTorrent('${torrent.hash}')" style="background: #dc3545; padding: 8px 16px;">
                             🗑️ Remove
                         </button>
                     </div>
@@ -504,51 +454,67 @@
             `).join('');
         }
 
-        // Stream file
-        function streamFile(torrentId, fileIndex, fileName) {
-            const streamUrl = `${API_BASE}/stream/${torrentId}/${fileIndex}`;
-            const videoPlayer = document.getElementById('videoPlayer');
-            const playerSection = document.getElementById('playerSection');
-            const nowPlaying = document.getElementById('nowPlaying');
-
-            videoPlayer.src = streamUrl;
-            nowPlaying.textContent = `Now playing: ${fileName}`;
-            playerSection.style.display = 'block';
-            
-            // Scroll to player
-            playerSection.scrollIntoView({ behavior: 'smooth' });
+        function getLargestVideoFile(files) {
+            const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.flv'];
+            const videoFiles = files.filter(f => videoExtensions.some(ext => f.name.toLowerCase().endsWith(ext)));
+            if (videoFiles.length === 0) return "No video file found";
+            return videoFiles.sort((a, b) => b.size - a.size)[0].name;
         }
 
-        // Auto-stream best video file
-        function autoStreamTorrent(torrentId, torrentName) {
+        // Stream torrent using HLS.js
+        function streamTorrent(torrentId, torrentName) {
             const streamUrl = `${API_BASE}/stream/${torrentId}`;
             const videoPlayer = document.getElementById('videoPlayer');
             const playerSection = document.getElementById('playerSection');
             const nowPlaying = document.getElementById('nowPlaying');
 
-            videoPlayer.src = streamUrl;
-            nowPlaying.textContent = `Auto-streaming: ${torrentName} (best video file selected automatically)`;
+            nowPlaying.textContent = `Loading: ${torrentName}`;
             playerSection.style.display = 'block';
             
-            // Scroll to player
+            if (Hls.isSupported()) {
+                const hls = new Hls();
+                hls.loadSource(streamUrl);
+                hls.attachMedia(videoPlayer);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    videoPlayer.play();
+                    nowPlaying.textContent = `Now playing: ${torrentName}`;
+                });
+                 hls.on(Hls.Events.ERROR, function (event, data) {
+                    if (data.fatal) {
+                        console.error('HLS Fatal Error:', data);
+                        nowPlaying.textContent = `HLS Error: ${data.details}. Check console.`;
+                    }
+                });
+            } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                videoPlayer.src = streamUrl;
+                videoPlayer.addEventListener('loadedmetadata', function() {
+                    videoPlayer.play();
+                    nowPlaying.textContent = `Now playing: ${torrentName}`;
+                });
+            } else {
+                nowPlaying.textContent = 'HLS is not supported by your browser.';
+            }
+            
             playerSection.scrollIntoView({ behavior: 'smooth' });
         }
 
         // Remove torrent
         async function removeTorrent(torrentId) {
-            if (!confirm('Are you sure you want to remove this torrent?')) {
+            if (!confirm('Are you sure you want to remove this torrent and its files?')) {
                 return;
             }
 
             try {
-                const response = await fetch(`${API_BASE}/torrent/${torrentId}`, {
+                const response = await fetch(`${API_BASE}/torrents/${torrentId}`, {
                     method: 'DELETE'
                 });
 
                 if (response.ok) {
+                    showStatus(document.getElementById('addStatus'), 'Torrent removed successfully.', 'success');
                     loadTorrents();
                 } else {
-                    alert('Failed to remove torrent');
+                    const result = await response.json();
+                    alert(`Failed to remove torrent: ${result.detail}`);
                 }
             } catch (error) {
                 alert(`Error: ${error.message}`);
@@ -558,7 +524,7 @@
         // Auto-refresh torrents
         function startAutoRefresh() {
             if (refreshInterval) clearInterval(refreshInterval);
-            refreshInterval = setInterval(loadTorrents, 5000);
+            refreshInterval = setInterval(loadTorrents, 3000);
         }
 
         // Utility functions
@@ -573,6 +539,7 @@
         }
 
         function escapeHtml(text) {
+            if (!text) return '';
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
@@ -587,12 +554,13 @@
         }
 
         function formatSpeed(bytesPerSecond) {
+            if (isNaN(bytesPerSecond)) return '0 Bytes/s';
             return formatBytes(bytesPerSecond) + '/s';
         }
 
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            checkHealth();
+            loadTorrents();
         });
 
         // Clean up on page unload
