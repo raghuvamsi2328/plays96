@@ -1,15 +1,42 @@
 import libtorrent as lt
 
-def get_torrent_status(handle):
-    """Translates libtorrent status enum to a human-readable string."""
+def get_torrent_status(torrent_info):
+    """
+    Converts a torrent info dictionary to a detailed status dictionary.
+    """
+    handle = torrent_info["handle"]
     if not handle.is_valid():
-        return "invalid"
+        # Return a minimal status if handle is not valid yet
+        return {
+            "hash": torrent_info.get("hash", "N/A"),
+            "name": "Connecting...",
+            "status": torrent_info.get("status", "metadata"),
+            "progress": 0,
+            "download_rate": 0,
+            "upload_rate": 0,
+            "num_peers": 0,
+            "files": [],
+        }
+
     s = handle.status()
-    state_str = [
-        'queued', 'checking', 'downloading_metadata', 'downloading',
-        'finished', 'seeding', 'allocating', 'checking_resume_data'
-    ]
-    return state_str[s.state]
+    info = handle.get_torrent_info()
+    
+    # Use the files list from torrent_info if available, otherwise build it
+    files = torrent_info.get("files", [])
+    if not files and info and info.num_files() > 0:
+         files = [to_dict(info.file_at(i)) for i in range(info.num_files())]
+
+
+    return {
+        "hash": str(s.info_hashes.v1).lower() if s.info_hashes.v1 else str(s.info_hashes.v2).lower(),
+        "name": info.name() if info else "N/A",
+        "status": torrent_info.get("status", str(s.state)),
+        "progress": s.progress * 100,
+        "download_rate": s.download_rate / 1000,  # KB/s
+        "upload_rate": s.upload_rate / 1000,    # KB/s
+        "num_peers": s.num_peers,
+        "files": files,
+    }
 
 def to_dict(torrent_info):
     """Creates a serializable dictionary from torrent data for API responses."""
