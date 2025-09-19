@@ -14,7 +14,7 @@ from src.utils import get_largest_video_file
 
 router = APIRouter()
 
-@router.get("/stream/{torrent_id}")
+@router.get("/{torrent_id}")
 async def get_hls_playlist(torrent_id: str, request: Request):
     """
     This is the main streaming endpoint.
@@ -31,7 +31,17 @@ async def get_hls_playlist(torrent_id: str, request: Request):
     # Find the main video file
     video_file = get_largest_video_file(torrent_info.get("files", []))
     if not video_file:
-        raise HTTPException(status_code=404, detail="No video file found in torrent yet")
+        # If files are not populated yet, wait for metadata
+        handle = torrent_info["handle"]
+        if not handle.has_metadata():
+             raise HTTPException(status_code=503, detail="Metadata not ready, please wait.")
+        # Re-fetch files if they were empty before
+        ti = handle.get_torrent_info()
+        files = [{"name": ti.file_at(i).path, "size": ti.file_at(i).size} for i in range(ti.num_files())]
+        torrent_info["files"] = files
+        video_file = get_largest_video_file(files)
+        if not video_file:
+            raise HTTPException(status_code=404, detail="No video file found in torrent.")
 
     hls_output_dir = os.path.join(HLS_PATH, torrent_id)
     playlist_path = os.path.join(hls_output_dir, "stream.m3u8")
@@ -78,7 +88,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
 
     return FileResponse(playlist_path, media_type='application/vnd.apple.mpegurl')
 
-@router.get("/stream/{torrent_id}/{segment}")
+@router.get("/{torrent_id}/{segment}")
 async def get_hls_segment(torrent_id: str, segment: str):
     """Serves the individual .ts segment files."""
     torrent_id = torrent_id.lower()

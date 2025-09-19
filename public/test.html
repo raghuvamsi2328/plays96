@@ -349,7 +349,7 @@
             addButtonLoading.style.display = 'inline-block';
 
             try {
-                const response = await fetch(`${API_BASE}/torrents/add-torrent`, {
+                const response = await fetch(`${API_BASE}/torrents`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',

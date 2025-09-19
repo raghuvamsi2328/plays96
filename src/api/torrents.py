@@ -33,7 +33,7 @@ class TorrentStatus(BaseModel):
     num_peers: int
     files: List[TorrentFile]
 
-@router.post("/add-torrent", status_code=202)
+@router.post("/", status_code=202)
 async def add_torrent(request: TorrentAddRequest):
     """
     Adds a new torrent and downloads only the initial 'warm cache' part.
@@ -44,6 +44,9 @@ async def add_torrent(request: TorrentAddRequest):
         params.save_path = DOWNLOAD_PATH
         params.storage_mode = lt.storage_mode_t.storage_mode_sparse
         handle = ses.add_torrent(params)
+        # Wait for the torrent to get info_hash
+        while not handle.is_valid() or not handle.has_metadata():
+            await asyncio.sleep(0.1)
         torrent_hash = str(handle.info_hash()).lower()
 
         if torrent_hash in active_torrents:
@@ -59,7 +62,9 @@ async def add_torrent(request: TorrentAddRequest):
         }
         
         # Set all files to priority 0 initially
-        handle.prioritize_files([0] * handle.get_torrent_info().num_files())
+        ti = handle.get_torrent_info()
+        if ti:
+            handle.prioritize_files([0] * ti.num_files())
 
         return {"message": "Torrent added", "torrent_id": torrent_hash}
 
@@ -67,13 +72,13 @@ async def add_torrent(request: TorrentAddRequest):
         logging.error(f"Failed to add torrent: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
-@router.get("/torrents", response_model=List[TorrentStatus])
+@router.get("/", response_model=List[TorrentStatus])
 async def get_all_torrents():
     """Returns the status of all active torrents."""
     statuses = [get_torrent_status(th) for th in active_torrents.values()]
     return statuses
 
-@router.get("/torrents/{torrent_id}", response_model=TorrentStatus)
+@router.get("/{torrent_id}", response_model=TorrentStatus)
 async def get_single_torrent(torrent_id: str):
     """Returns the status of a single torrent."""
     torrent_id = torrent_id.lower()
@@ -82,7 +87,7 @@ async def get_single_torrent(torrent_id: str):
         raise HTTPException(status_code=404, detail="Torrent not found")
     return get_torrent_status(torrent_info)
 
-@router.delete("/torrents/{torrent_id}", status_code=200)
+@router.delete("/{torrent_id}", status_code=200)
 async def remove_torrent(torrent_id: str):
     """Removes a torrent and its downloaded files."""
     torrent_id = torrent_id.lower()
