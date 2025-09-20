@@ -29,7 +29,7 @@ def get_torrent_status(torrent_info):
     status_str = torrent_info.get("status", str(s.state))
     progress = s.progress * 100
     if status_str == "metadata":
-        progress = 0
+        progress = 0.0
 
     return {
         "hash": str(s.info_hashes.v1).lower() if s.info_hashes.v1 else str(s.info_hashes.v2).lower(),

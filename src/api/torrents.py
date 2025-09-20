@@ -25,6 +25,7 @@ class FileStatus(BaseModel):
     name: str
     size: int
     progress: float
+    is_video: bool = False
 
 class TorrentStatus(BaseModel):
     hash: str
