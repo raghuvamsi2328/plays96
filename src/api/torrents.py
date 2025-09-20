@@ -15,24 +15,8 @@ from src.utils import get_largest_video_file, get_torrent_status, to_dict
 
 router = APIRouter()
 
-class TorrentAddRequest(BaseModel):
-    magnet_link: str
 
-class TorrentFile(BaseModel):
-    name: str
-    size: int
-    progress: float
-
-class TorrentStatus(BaseModel):
-    hash: str
-    name: str
-    status: str
-    progress: float
-    download_rate: float
-    upload_rate: float
-    num_peers: int
-    files: List[TorrentFile]
-
+@router.post("", status_code=202, include_in_schema=False)
 @router.post("/", status_code=202)
 async def add_torrent(request: TorrentAddRequest):
     """
@@ -72,6 +56,7 @@ async def add_torrent(request: TorrentAddRequest):
         logging.error(f"Failed to add torrent: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.get("", response_model=List[TorrentStatus], include_in_schema=False)
 @router.get("/", response_model=List[TorrentStatus])
 async def get_all_torrents():
     """Returns the status of all active torrents."""

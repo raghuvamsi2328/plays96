@@ -291,9 +291,6 @@
                 <!-- Server Status Section -->
                 <div class="section">
                     <h2>📊 Server Status</h2>
-                    <button onclick="checkHealth()" id="healthButton">Check Health</button>
-                    <div id="healthStatus" class="status"></div>
-                    
                     <div style="margin-top: 20px;">
                         <button onclick="loadTorrents()" id="loadButton">Refresh Torrents</button>
                     </div>
@@ -558,7 +555,7 @@
             return formatBytes(bytesPerSecond) + '/s';
         }
 
-        // Initialize
+                // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             loadTorrents();
         });
