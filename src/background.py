@@ -9,86 +9,52 @@ import libtorrent as lt
 from src.config import (
     DOWNLOAD_PATH,
     HLS_PATH,
-    WARM_CACHE_SIZE_MB,
     WARM_CACHE_TIMEOUT_MINUTES,
 )
 from src.state import active_torrents, get_session
-from src.utils import get_largest_video_file
 
 
 async def alert_listener():
-    """
-    Listens for libtorrent alerts and updates torrent status.
-    Manages the transition from metadata -> warm cache -> full download.
-    """
+    """Listens for and processes libtorrent alerts."""
     ses = get_session()
     while True:
         alerts = ses.pop_alerts()
         for alert in alerts:
             if isinstance(alert, lt.metadata_received_alert):
-                handle = alert.handle
-                if not handle.is_valid() or str(handle.info_hash()).lower() not in active_torrents:
-                    continue
-                
-                torrent_hash = str(handle.info_hash()).lower()
-                torrent_info = active_torrents[torrent_hash]
-                
-                logging.info(f"Metadata received for {torrent_hash}")
-                torrent_info["status"] = "downloading_warm_cache"
-                
-                # Find the largest video file and prioritize it
-                ti = handle.get_torrent_info()
-                files = [to_dict(ti.file_at(i)) for i in range(ti.num_files())]
-                torrent_info["files"] = files
-                
-                video_file = get_largest_video_file(files)
-                if video_file:
-                    video_file_index = files.index(video_file)
-                    
-                    # Set priorities: 1 for the video file, 0 for others
-                    priorities = [0] * len(files)
-                    priorities[video_file_index] = 1
-                    handle.prioritize_files(priorities)
-                    
-                    # Set file deadlines for the warm cache
-                    piece_size = ti.piece_length()
-                    warm_cache_bytes = WARM_CACHE_SIZE_MB * 1024 * 1024
-                    
-                    start_piece, _ = ti.map_file(video_file_index, 0, 1)
-                    end_piece, _ = ti.map_file(video_file_index, warm_cache_bytes, 1)
-                    
-                    for i in range(start_piece, end_piece + 1):
-                        handle.set_piece_deadline(i, 1000) # 1 second deadline
-                        
-                    logging.info(f"Prioritizing warm cache ({WARM_CACHE_SIZE_MB}MB) for {video_file['name']}")
-                else:
-                    logging.warning(f"No video file found for torrent {torrent_hash}")
+                h = alert.handle
+                info_hash = str(h.info_hash())
+                if info_hash in active_torrents:
+                    info = h.get_torrent_info()
+                    files = []
+                    for i in range(info.num_files()):
+                        file_entry = info.file_at(i)
+                        files.append({
+                            "index": i,
+                            "name": file_entry.path,
+                            "size": file_entry.size,
+                            "progress": 0.0,
+                            "is_video": any(file_entry.path.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov'])
+                        })
+                    active_torrents[info_hash]["info"] = info
+                    active_torrents[info_hash]["name"] = info.name()
+                    active_torrents[info_hash]["files"] = files
+                    active_torrents[info_hash]["status"] = "downloading"
+                    logging.info(f"Metadata received for {info.name()}")
 
-            elif isinstance(alert, lt.piece_finished_alert):
-                handle = alert.handle
-                if not handle.is_valid() or str(handle.info_hash()).lower() not in active_torrents:
-                    continue
-                
-                torrent_hash = str(handle.info_hash()).lower()
-                torrent_info = active_torrents[torrent_hash]
-                
-                if torrent_info["status"] == "downloading_warm_cache":
-                    ti = handle.get_torrent_info()
-                    files = torrent_info["files"]
-                    video_file = get_largest_video_file(files)
-                    if video_file:
-                        video_file_index = files.index(video_file)
-                        warm_cache_bytes = WARM_CACHE_SIZE_MB * 1024 * 1024
-                        
-                        # Check if warm cache download is complete
-                        file_status = handle.file_progress(flags=lt.file_progress_flags_t.piece_granularity)
-                        if file_status[video_file_index] * ti.piece_length() >= warm_cache_bytes:
-                            logging.info(f"Warm cache download complete for {torrent_hash}. Pausing torrent.")
-                            handle.pause()
-                            torrent_info["status"] = "paused"
-                            # Reset deadlines
-                            for i in range(ti.num_pieces()):
-                                handle.clear_piece_deadlines(i)
+            elif isinstance(alert, lt.torrent_finished_alert):
+                h = alert.handle
+                info_hash = str(h.info_hash())
+                if info_hash in active_torrents:
+                    active_torrents[info_hash]["status"] = "completed"
+                logging.info(f"Torrent finished: {info_hash}")
+
+            elif isinstance(alert, lt.torrent_error_alert):
+                h = alert.handle
+                info_hash = str(h.info_hash())
+                if info_hash in active_torrents:
+                    active_torrents[info_hash]["status"] = "error"
+                    active_torrents[info_hash]["error"] = alert.error.message()
+                logging.error(f"Torrent error for {info_hash}: {alert.error.message()}")
 
         await asyncio.sleep(1)
 
@@ -127,16 +93,4 @@ async def cleanup_inactive_streams():
                     shutil.rmtree(hls_output_dir)
                     logging.info(f"Deleted HLS directory: {hls_output_dir}")
                     
-                # Pause the torrent if it's not already
-                handle = torrent_info["handle"]
-                if not handle.status().paused:
-                    handle.pause()
-                    torrent_info["status"] = "paused"
-                    logging.info(f"Paused torrent {torrent_id} after HLS cleanup.")
-
-def to_dict(file_entry):
-    return {
-        'path': file_entry.path,
-        'size': file_entry.size,
-        'offset': file_entry.offset
-    }
+                # Don't pause the torrent - let it continue downloading

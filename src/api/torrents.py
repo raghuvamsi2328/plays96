@@ -10,8 +10,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.config import DOWNLOAD_PATH, HLS_PATH
-from src.config import DOWNLOAD_PATH, HLS_PATH
-from src.config import DOWNLOAD_PATH, HLS_PATH
 from src.state import active_torrents, get_session
 from src.utils import get_torrent_status
 
@@ -45,7 +43,7 @@ class TorrentStatus(BaseModel):
 @router.post("/", status_code=202)
 async def add_torrent(request: TorrentAddRequest):
     """
-    Adds a new torrent and downloads only the initial 'warm cache' part.
+    Adds a new torrent.
     """
     ses = get_session()
     try:
@@ -70,11 +68,6 @@ async def add_torrent(request: TorrentAddRequest):
             "hls_last_accessed": None,
         }
         
-        # Set all files to priority 0 initially
-        ti = handle.get_torrent_info()
-        if ti:
-            handle.prioritize_files([0] * ti.num_files())
-
         return {"message": "Torrent added", "torrent_id": torrent_hash}
 
     except Exception as e:

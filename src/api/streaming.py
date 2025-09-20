@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from src.config import DOWNLOAD_PATH, HLS_PATH, WARM_CACHE_TIMEOUT_MINUTES
 from src.state import active_torrents, get_session
 from src.utils import get_largest_video_file
+from src.utils import get_largest_video_file
 
 router = APIRouter()
 
@@ -37,7 +38,16 @@ async def get_hls_playlist(torrent_id: str, request: Request):
              raise HTTPException(status_code=503, detail="Metadata not ready, please wait.")
         # Re-fetch files if they were empty before
         ti = handle.get_torrent_info()
-        files = [{"name": ti.file_at(i).path, "size": ti.file_at(i).size} for i in range(ti.num_files())]
+        files = []
+        for i in range(ti.num_files()):
+            file_entry = ti.file_at(i)
+            files.append({
+                "index": i,
+                "name": file_entry.path,
+                "size": file_entry.size,
+                "progress": 0.0,
+                "is_video": any(file_entry.path.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov'])
+            })
         torrent_info["files"] = files
         video_file = get_largest_video_file(files)
         if not video_file:
@@ -56,11 +66,26 @@ async def get_hls_playlist(torrent_id: str, request: Request):
             handle.resume()
             torrent_info["status"] = "downloading"
             
+        # Prioritize the video file for download
+        if "files" in torrent_info and torrent_info["files"]:
+            ti = handle.get_torrent_info()
+            video_file_index = None
+            for i, file_info in enumerate(torrent_info["files"]):
+                if file_info["name"] == video_file["name"]:
+                    video_file_index = i
+                    break
+            
+            if video_file_index is not None:
+                priorities = [1] * len(torrent_info["files"])  # Normal priority for all
+                priorities[video_file_index] = 7  # High priority for video file
+                handle.prioritize_files(priorities)
+                logging.info(f"Prioritized video file: {video_file['name']}")
+            
         os.makedirs(hls_output_dir, exist_ok=True)
         
         source_file_path = os.path.join(DOWNLOAD_PATH, video_file["name"])
 
-        # Wait for the warm cache to be ready before starting ffmpeg
+        # Wait for the file to exist before starting ffmpeg
         while not os.path.exists(source_file_path):
             logging.info(f"Waiting for source file to exist: {source_file_path}")
             await asyncio.sleep(1)
