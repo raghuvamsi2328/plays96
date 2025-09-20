@@ -38,36 +38,14 @@ def get_torrent_status(torrent_info):
         "files": files,
     }
 
-def to_dict(torrent_info):
-    """Creates a serializable dictionary from torrent data for API responses."""
-    handle = torrent_info.get("handle")
-    if not handle or not handle.is_valid():
-        return {
-            "id": torrent_info.get("id"),
-            "name": torrent_info.get("name"),
-            "status": "error",
-            "error": "Invalid handle",
-            "progress": 0,
-            "downloadSpeed": 0,
-            "uploadSpeed": 0,
-            "peers": 0,
-            "files": [],
-        }
-
-    s = handle.status()
+def to_dict(file_entry):
+    """
+    Converts a libtorrent file_entry to a dictionary that matches our Pydantic model.
+    """
     return {
-        "id": str(s.info_hash),
-        "hash": str(s.info_hash),
-        "name": torrent_info.get("name"),
-        "status": get_torrent_status(handle),
-        "progress": round(s.progress * 100, 2),
-        "downloadSpeed": s.download_rate,
-        "uploadSpeed": s.upload_rate,
-        "peers": s.num_peers,
-        "files": torrent_info.get("files", []),
-        "addedAt": torrent_info.get("added_at"),
-        "lastAccessedAt": torrent_info.get("last_accessed_at"),
-        "error": torrent_info.get("error"),
+        'name': file_entry.path,
+        'size': file_entry.size,
+        'progress': 0.0 # Default progress to 0, it will be updated later
     }
 
 def get_largest_video_file(files):
