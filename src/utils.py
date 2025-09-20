@@ -21,10 +21,10 @@ def get_torrent_status(torrent_info):
     s = handle.status()
     info = handle.get_torrent_info()
     
-    # Use the files list from torrent_info if available, otherwise build it
-    files = torrent_info.get("files", [])
-    if not files and info and info.num_files() > 0:
-         files = [to_dict(info.file_at(i)) for i in range(info.num_files())]
+    files = []
+    if info and info.num_files() > 0:
+        files = [to_dict(info.file_at(i)) for i in range(info.num_files())]
+    # If info isn't ready, files will be an empty list, which is the correct state.
 
 
     return {
@@ -45,7 +45,7 @@ def to_dict(file_entry):
     return {
         'name': file_entry.path,
         'size': file_entry.size,
-        'progress': 0.0 # Default progress to 0, it will be updated later
+        'progress': 0.0  # Default progress to 0, it will be updated later
     }
 
 def get_largest_video_file(files):
