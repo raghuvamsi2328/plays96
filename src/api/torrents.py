@@ -9,11 +9,35 @@ import libtorrent as lt
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from src.config import DOWNLOAD_PATH, HLS_PATH, WARM_CACHE_SIZE_MB
+from src.config import DOWNLOAD_PATH, HLS_PATH
+from src.config import DOWNLOAD_PATH, HLS_PATH
+from src.config import DOWNLOAD_PATH, HLS_PATH
 from src.state import active_torrents, get_session
-from src.utils import get_largest_video_file, get_torrent_status, to_dict
+from src.utils import get_torrent_status
 
 router = APIRouter()
+
+# Pydantic Models for API requests and responses
+class TorrentAddRequest(BaseModel):
+    magnet_link: str
+
+class FileStatus(BaseModel):
+    name: str
+    size: int
+    progress: float
+
+class TorrentStatus(BaseModel):
+    hash: str
+    name: str
+    status: str
+    progress: float
+    download_rate: float
+    upload_rate: float
+    num_peers: int
+    files: List[FileStatus]
+
+
+
 
 
 @router.post("", status_code=202, include_in_schema=False)
