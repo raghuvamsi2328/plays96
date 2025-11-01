@@ -518,11 +518,8 @@
             }
         }
 
-        // Auto-refresh torrents
-        function startAutoRefresh() {
-            if (refreshInterval) clearInterval(refreshInterval);
-            refreshInterval = setInterval(loadTorrents, 3000);
-        }
+
+        // Removed auto-refresh. User must click Refresh Torrents to update.
 
         // Utility functions
         function showStatus(element, message, type) {

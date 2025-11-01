@@ -94,7 +94,11 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         # video_file["name"] contains the relative path from the download directory
         source_file_path = download_base / video_file["name"]
 
+
         logger.info(f"Looking for source file at: {source_file_path.absolute()}")
+        logger.info(f"File exists: {source_file_path.exists()}")
+        logger.info(f"Expected file name: {source_file_path.name}")
+        logger.info(f"Files in directory: {list(source_file_path.parent.iterdir())}")
 
         # Wait for the file to exist before starting ffmpeg with timeout
         start_time = datetime.now()
