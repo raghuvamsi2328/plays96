@@ -1,20 +1,22 @@
 version: "3.8"
+
 services:
   torrent-server:
     build: .
     container_name: plays96-torrent
-    # Keep port for now to test, remove later
+    user: "1000:1000"  # Add this line - use your UID:GID
     ports:
       - 6991:6991
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
+      - ./hls:/app/hls  # Add HLS output directory
     environment:
       - NODE_ENV=production
       - PORT=6991
     restart: unless-stopped
     networks:
-      - proxy-net # Make sure this is indented correctly
+      - proxy-net
     healthcheck:
       test:
         - CMD
@@ -24,6 +26,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+
 networks:
   proxy-net:
     external: true
