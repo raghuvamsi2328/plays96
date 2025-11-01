@@ -85,33 +85,91 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         
         source_file_path = os.path.join(DOWNLOAD_PATH, video_file["name"])
 
-        # Wait for the file to exist before starting ffmpeg
+        # Wait for the file to exist before starting ffmpeg with timeout
+        start_time = datetime.now()
+        file_wait_timeout = timedelta(minutes=5)  # 5 minutes timeout for file to appear
+        
         while not os.path.exists(source_file_path):
+            if datetime.now() - start_time > file_wait_timeout:
+                logging.error(f"Timeout waiting for source file: {source_file_path}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Timeout waiting for video file to be downloaded"
+                )
             logging.info(f"Waiting for source file to exist: {source_file_path}")
             await asyncio.sleep(1)
 
+        # Ensure paths with spaces are properly quoted for FFmpeg
+        def escape_path(path):
+            # Replace backslashes with forward slashes for FFmpeg
+            path = path.replace('\\', '/')
+            # Quote the path if it contains spaces
+            if ' ' in path:
+                return f'"{path}"'
+            return path
+
+        source_file_path_escaped = escape_path(source_file_path)
+        hls_segment_path_escaped = escape_path(os.path.join(hls_output_dir, 'segment%03d.ts'))
+        playlist_path_escaped = escape_path(playlist_path)
+
         ffmpeg_cmd = [
             'ffmpeg',
-            '-i', source_file_path,
+            '-i', source_file_path_escaped,
             '-c:a', 'aac',
             '-c:v', 'copy',
             '-f', 'hls',
             '-hls_time', '10',
             '-hls_list_size', '0', # Keep all segments
-            '-hls_segment_filename', os.path.join(hls_output_dir, 'segment%03d.ts'),
-            playlist_path
+            '-hls_segment_filename', hls_segment_path_escaped,
+            playlist_path_escaped
         ]
         
         logging.info(f"Starting FFmpeg for {torrent_id}: {' '.join(ffmpeg_cmd)}")
         process = await asyncio.create_subprocess_exec(*ffmpeg_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         torrent_info["hls_process"] = process
 
-    # Wait for the playlist file to be created
-    while not os.path.exists(playlist_path):
-        logging.info(f"Waiting for playlist to be created: {playlist_path}")
-        await asyncio.sleep(1)
+        # Start monitoring the process stderr in background
+        async def monitor_stderr():
+            stderr = []
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                stderr.append(line.decode().strip())
+                logging.debug(f"FFmpeg stderr: {line.decode().strip()}")
+            return stderr
 
-    return FileResponse(playlist_path, media_type='application/vnd.apple.mpegurl')
+        stderr_task = asyncio.create_task(monitor_stderr())
+
+        # Wait for the playlist file to be created with timeout
+        start_time = datetime.now()
+        timeout = timedelta(minutes=2)  # 2 minutes timeout
+        
+        while not os.path.exists(playlist_path):
+            # Check if process is still running
+            if process.returncode is not None:
+                stderr_output = await stderr_task
+                error_msg = "\n".join(stderr_output) if stderr_output else "Unknown error"
+                logging.error(f"FFmpeg process failed with return code {process.returncode}. Error: {error_msg}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"FFmpeg conversion failed: {error_msg[:200]}..."  # Truncate long error messages
+                )
+
+            # Check timeout
+            if datetime.now() - start_time > timeout:
+                process.terminate()  # Clean up the process
+                await process.wait()  # Wait for termination
+                logging.error(f"Timeout waiting for playlist creation for torrent {torrent_id}")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Timeout waiting for HLS conversion to start"
+                )
+
+            logging.info(f"Waiting for playlist to be created: {playlist_path}")
+            await asyncio.sleep(1)
+
+        return FileResponse(playlist_path, media_type='application/vnd.apple.mpegurl')
 
 @router.get("/{torrent_id}/{segment}")
 async def get_hls_segment(torrent_id: str, segment: str):
