@@ -133,11 +133,11 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         ]
 
 
-    # Log the FFmpeg command with all arguments quoted for clarity
-    quoted_cmd = ' '.join([f'"{arg}"' if ' ' in arg else arg for arg in ffmpeg_cmd])
-    logger.info(f"Starting FFmpeg for {torrent_id}")
-    logger.info(f"FFmpeg command: {quoted_cmd}")
-    logger.info(f"FFmpeg input file exists (pre-run): {source_file_path.exists()}")
+        # Log the FFmpeg command with all arguments quoted for clarity
+        quoted_cmd = ' '.join([f'"{arg}"' if ' ' in arg else arg for arg in ffmpeg_cmd])
+        logger.info(f"Starting FFmpeg for {torrent_id}")
+        logger.info(f"FFmpeg command: {quoted_cmd}")
+        logger.info(f"FFmpeg input file exists (pre-run): {source_file_path.exists()}")
 
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
