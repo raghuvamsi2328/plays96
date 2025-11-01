@@ -1,10 +1,11 @@
-version: '3.8'
-
+version: "3.8"
 services:
   torrent-server:
     build: .
+    container_name: plays96-torrent
+    # Keep port for now to test, remove later
     ports:
-      - "6991:6991"
+      - 6991:6991
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
@@ -12,12 +13,17 @@ services:
       - NODE_ENV=production
       - PORT=6991
     restart: unless-stopped
+    networks:
+      - proxy-net # Make sure this is indented correctly
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6991/health"]
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:6991/health
       interval: 30s
       timeout: 10s
       retries: 3
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.torrent.rule=Host(`torrent.yourdomain.com`)"
-      - "traefik.http.services.torrent.loadbalancer.server.port=6991"
+networks:
+  proxy-net:
+    external: true
