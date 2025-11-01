@@ -58,13 +58,13 @@ async def get_hls_playlist(torrent_id: str, request: Request):
 
 
     # Use absolute paths with Path for better path handling
-    download_base = Path(DOWNLOAD_PATH)
-    hls_base = Path(HLS_PATH)
+    download_base = Path(DOWNLOAD_PATH).resolve()
+    hls_base = Path(HLS_PATH).resolve()
     hls_output_dir = hls_base / torrent_id
     playlist_path = hls_output_dir / "stream.m3u8"
 
-    # If HLS process is not running, start it
 
+    # If HLS process is not running, start it
     if not torrent_info.get("hls_process") or torrent_info["hls_process"].returncode is not None:
         logger.info(f"HLS process not running for {torrent_id}. Starting now.")
         # Ensure the torrent is fully downloading
@@ -90,12 +90,12 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         # Create HLS output directory with proper permissions
         hls_output_dir.mkdir(parents=True, exist_ok=True, mode=0o777)
 
-        # CRITICAL FIX: Use absolute path for source file
-        # video_file["name"] contains the relative path from the download directory
-        source_file_path = download_base / video_file["name"]
+        # Use absolute path for source file
+        source_file_path = (download_base / video_file["name"]).resolve()
+        hls_segment_path = (hls_output_dir / 'segment%03d.ts').resolve()
+        playlist_path_abs = playlist_path.resolve()
 
-
-        logger.info(f"Looking for source file at: {source_file_path.absolute()}")
+        logger.info(f"Looking for source file at: {source_file_path}")
         logger.info(f"File exists: {source_file_path.exists()}")
         logger.info(f"Expected file name: {source_file_path.name}")
         logger.info(f"Files in directory: {list(source_file_path.parent.iterdir())}")
@@ -105,7 +105,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         file_wait_timeout = timedelta(minutes=5)
         while not source_file_path.exists():
             if datetime.now() - start_time > file_wait_timeout:
-                logger.error(f"Timeout waiting for source file: {source_file_path.absolute()}")
+                logger.error(f"Timeout waiting for source file: {source_file_path}")
                 # List what files actually exist for debugging
                 if download_base.exists():
                     logger.error(f"Files in download directory: {list(download_base.rglob('*'))[:10]}")
@@ -113,34 +113,29 @@ async def get_hls_playlist(torrent_id: str, request: Request):
                     status_code=500,
                     detail=f"Timeout waiting for video file: {video_file['name']}"
                 )
-            logger.info(f"Waiting for source file to exist: {source_file_path.absolute()}")
+            logger.info(f"Waiting for source file to exist: {source_file_path}")
             await asyncio.sleep(1)
 
-        logger.info(f"Source file found: {source_file_path.absolute()}")
+        logger.info(f"Source file found: {source_file_path}")
         logger.info(f"File size: {source_file_path.stat().st_size / (1024**3):.2f} GB")
-
-        # FFmpeg paths - use absolute string paths
-    source_file_str = str(source_file_path.resolve())
-        hls_segment_path = str((hls_output_dir / 'segment%03d.ts').absolute())
-        playlist_path_str = str(playlist_path.absolute())
 
         # FFmpeg command with absolute paths
         ffmpeg_cmd = [
             'ffmpeg',
-            '-i', source_file_str,
+            '-i', str(source_file_path),
             '-c:a', 'aac',
             '-c:v', 'copy',
             '-f', 'hls',
             '-hls_time', '10',
             '-hls_list_size', '0',
-            '-hls_segment_filename', hls_segment_path,
-            playlist_path_str
+            '-hls_segment_filename', str(hls_segment_path),
+            str(playlist_path_abs)
         ]
 
         logger.info(f"Starting FFmpeg for {torrent_id}")
         logger.info(f"Command: {' '.join(ffmpeg_cmd)}")
-        logger.info(f"FFmpeg input file exists (pre-run): {os.path.exists(source_file_str)}")
-        
+        logger.info(f"FFmpeg input file exists (pre-run): {source_file_path.exists()}")
+
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
             cwd='/usr/src/app',
@@ -166,7 +161,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         # Wait for the playlist file to be created with timeout
         start_time = datetime.now()
         timeout = timedelta(minutes=2)
-        while not playlist_path.exists():
+        while not playlist_path_abs.exists():
             if process.returncode is not None:
                 stderr_output = await stderr_task
                 error_msg = "\n".join(stderr_output[-20:]) if stderr_output else "Unknown error"
@@ -184,11 +179,11 @@ async def get_hls_playlist(torrent_id: str, request: Request):
                     status_code=500,
                     detail="Timeout waiting for HLS conversion to start"
                 )
-            logger.info(f"Waiting for playlist to be created: {playlist_path.absolute()}")
+            logger.info(f"Waiting for playlist to be created: {playlist_path_abs}")
             await asyncio.sleep(1)
 
-        logger.info(f"Playlist created successfully: {playlist_path.absolute()}")
-        return FileResponse(str(playlist_path), media_type='application/vnd.apple.mpegurl')
+        logger.info(f"Playlist created successfully: {playlist_path_abs}")
+        return FileResponse(str(playlist_path_abs), media_type='application/vnd.apple.mpegurl')
 
 
 @router.get("/{torrent_id}/{segment}")
