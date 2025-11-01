@@ -120,7 +120,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         logger.info(f"File size: {source_file_path.stat().st_size / (1024**3):.2f} GB")
 
         # FFmpeg paths - use absolute string paths
-        source_file_str = str(source_file_path.absolute())
+    source_file_str = str(source_file_path.resolve())
         hls_segment_path = str((hls_output_dir / 'segment%03d.ts').absolute())
         playlist_path_str = str(playlist_path.absolute())
 
@@ -139,9 +139,11 @@ async def get_hls_playlist(torrent_id: str, request: Request):
 
         logger.info(f"Starting FFmpeg for {torrent_id}")
         logger.info(f"Command: {' '.join(ffmpeg_cmd)}")
-
+        logger.info(f"FFmpeg input file exists (pre-run): {os.path.exists(source_file_str)}")
+        
         process = await asyncio.create_subprocess_exec(
             *ffmpeg_cmd,
+            cwd='/usr/src/app',
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
