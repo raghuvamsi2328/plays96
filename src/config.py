@@ -14,6 +14,11 @@ DOWNLOAD_PATH = Path(os.getenv("DOWNLOAD_PATH", str(BASE_DIR / "downloads"))).re
 HLS_PATH = Path(os.getenv("HLS_PATH", str(BASE_DIR / "hls"))).resolve()
 WARM_CACHE_TIMEOUT_MINUTES = 20
 
+# Diagnostic: log all environment variables at startup
+logging.info("[CONFIG] All environment variables at startup:")
+for k, v in os.environ.items():
+	logging.info(f"[ENV] {k}={v}")
+
 # Log the resolved paths at import time for debugging
 logging.info(f"[CONFIG] DOWNLOAD_PATH: {DOWNLOAD_PATH}")
 logging.info(f"[CONFIG] HLS_PATH: {HLS_PATH}")
