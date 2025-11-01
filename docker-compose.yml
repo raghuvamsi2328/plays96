@@ -4,13 +4,13 @@ services:
   torrent-server:
     build: .
     container_name: plays96-torrent
-    user: "1000:1000"  # Add this line - use your UID:GID
+    user: "0:0"  # Run as root to avoid permission issues
     ports:
       - 6991:6991
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
-      - ./hls:/app/hls  # Add HLS output directory
+      - ./hls:/app/hls
     environment:
       - NODE_ENV=production
       - PORT=6991
