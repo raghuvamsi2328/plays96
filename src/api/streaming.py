@@ -18,16 +18,17 @@ from src.utils import get_largest_video_file
 router = APIRouter()
 
 HLS_SEGMENT_DURATION_SECONDS = 10
-INITIAL_BUFFER_BYTES = 32 * 1024 * 1024
+INITIAL_BUFFER_BYTES = 128 * 1024 * 1024
 SEEK_WINDOW_BYTES = 24 * 1024 * 1024
 APPROX_BYTES_PER_SECOND = 2_000_000
-SEEK_BUFFER_BYTES = 8 * 1024 * 1024
+SEEK_BUFFER_BYTES = 128 * 1024 * 1024
+PROBE_BUFFER_BYTES = 16 * 1024 * 1024
 INITIAL_BUFFER_WAIT_SECONDS = 60
 PLAYLIST_WAIT_SECONDS = 30
 SEGMENT_WAIT_SECONDS = 30
-FFMPEG_PACE_CHECK_SECONDS = 1
-FFMPEG_MIN_AHEAD_BYTES = 24 * 1024 * 1024
-FFMPEG_RESUME_AHEAD_BYTES = 48 * 1024 * 1024
+FFMPEG_PACE_CHECK_SECONDS = 0.25
+FFMPEG_MIN_AHEAD_BYTES = 128 * 1024 * 1024
+FFMPEG_RESUME_AHEAD_BYTES = 256 * 1024 * 1024
 FFMPEG_REPRIO_STEP_BYTES = 8 * 1024 * 1024
 
 
@@ -51,33 +52,36 @@ def _get_torrent_lock(torrent_info):
     return lock
 
 
-def _get_file_progress_bytes(handle, file_index):
-    try:
-        progress = handle.file_progress(flags=1)
-    except TypeError:
-        progress = handle.file_progress()
-    except RuntimeError:
-        return None
-
-    if file_index is None or file_index < 0 or file_index >= len(progress):
-        return None
-
-    return progress[file_index]
-
-
 def _are_pieces_available(handle, start_piece, end_piece):
     try:
         pieces = getattr(handle.status(), "pieces", None)
     except RuntimeError:
         return False
 
-    if not pieces:
+    if pieces is not None:
+        if start_piece < 0 or end_piece >= len(pieces):
+            return False
+
+        return all(pieces[piece] for piece in range(start_piece, end_piece + 1))
+
+    try:
+        return all(handle.have_piece(piece) for piece in range(start_piece, end_piece + 1))
+    except (AttributeError, RuntimeError):
         return False
 
-    if start_piece < 0 or end_piece >= len(pieces):
+
+def _is_torrent_complete(torrent_info):
+    handle = torrent_info["handle"]
+    try:
+        status = handle.status()
+    except RuntimeError:
         return False
 
-    return all(pieces[piece] for piece in range(start_piece, end_piece + 1))
+    is_seeding = getattr(status, "is_seeding", False)
+    if callable(is_seeding):
+        is_seeding = is_seeding()
+
+    return bool(is_seeding) or status.progress >= 0.9999 or torrent_info.get("status") == "completed"
 
 
 def _reprioritize_for_offset(torrent_info, file_index, byte_offset):
@@ -134,43 +138,32 @@ def _get_piece_window(torrent_info, file_index, byte_offset, window_bytes):
     return start_piece, end_piece
 
 
+def _is_byte_range_available(torrent_info, file_index, byte_offset, window_bytes):
+    if _is_torrent_complete(torrent_info):
+        return True
+
+    start_piece, end_piece = _get_piece_window(torrent_info, file_index, byte_offset, window_bytes)
+    if start_piece is None or end_piece is None:
+        return False
+
+    return _are_pieces_available(torrent_info["handle"], start_piece, end_piece)
+
+
 async def _wait_for_initial_buffer(torrent_info, file_index, file_size):
     if file_index is None or file_size <= 0:
         return
 
-    target_bytes = min(file_size, INITIAL_BUFFER_BYTES)
-    handle = torrent_info["handle"]
-    deadline = asyncio.get_running_loop().time() + INITIAL_BUFFER_WAIT_SECONDS
-
-    while asyncio.get_running_loop().time() < deadline:
-        downloaded_bytes = _get_file_progress_bytes(handle, file_index)
-        if downloaded_bytes is None:
-            logging.warning("File progress is unavailable; starting FFmpeg without buffered-bytes check")
-            return
-        if downloaded_bytes is not None and downloaded_bytes >= target_bytes:
-            return
-        await asyncio.sleep(1)
-
-    raise HTTPException(status_code=503, detail="Initial stream buffer not ready")
+    await _wait_for_byte_range(torrent_info, file_index, 0, min(file_size, INITIAL_BUFFER_BYTES))
 
 
 async def _wait_for_byte_range(torrent_info, file_index, byte_offset, window_bytes):
     if file_index is None:
         return
 
-    handle = torrent_info["handle"]
     deadline = asyncio.get_running_loop().time() + INITIAL_BUFFER_WAIT_SECONDS
-    start_piece, end_piece = _get_piece_window(torrent_info, file_index, byte_offset, window_bytes)
 
     while asyncio.get_running_loop().time() < deadline:
-        if start_piece is not None and end_piece is not None and _are_pieces_available(handle, start_piece, end_piece):
-            return
-
-        downloaded_bytes = _get_file_progress_bytes(handle, file_index)
-        if downloaded_bytes is None:
-            logging.warning("Piece availability is unavailable; continuing seek without byte-range confirmation")
-            return
-        if downloaded_bytes >= byte_offset + min(window_bytes, SEEK_BUFFER_BYTES):
+        if _is_byte_range_available(torrent_info, file_index, byte_offset, window_bytes):
             return
         await asyncio.sleep(1)
 
@@ -331,56 +324,126 @@ def _estimated_read_offset_bytes(start_segment, hls_output_dir, bytes_per_second
     return segment_index * HLS_SEGMENT_DURATION_SECONDS * bytes_per_second
 
 
-async def _pace_ffmpeg_process(torrent_id, torrent_info, process, file_index, hls_output_dir, start_segment):
+def _get_process_file_offset(process, source_file_path):
+    fd_dir = Path(f"/proc/{process.pid}/fd")
+    fdinfo_dir = Path(f"/proc/{process.pid}/fdinfo")
+    if not fd_dir.exists() or not fdinfo_dir.exists():
+        return None
+
+    for fd_path in fd_dir.iterdir():
+        try:
+            target_path = os.readlink(fd_path)
+        except OSError:
+            continue
+
+        if target_path.endswith(" (deleted)"):
+            target_path = target_path[:-10]
+
+        try:
+            if not os.path.samefile(target_path, source_file_path):
+                continue
+        except OSError:
+            if os.path.abspath(target_path) != os.path.abspath(source_file_path):
+                continue
+
+        fdinfo_path = fdinfo_dir / fd_path.name
+        try:
+            fdinfo = fdinfo_path.read_text()
+        except OSError:
+            return None
+
+        for line in fdinfo.splitlines():
+            if line.startswith("pos:"):
+                try:
+                    return int(line.split()[1])
+                except (IndexError, ValueError):
+                    return None
+
+    return None
+
+
+def _resume_paused_ffmpeg(torrent_info, process):
+    if not torrent_info.get("hls_process_paused"):
+        return False
+
+    try:
+        os.kill(process.pid, signal.SIGCONT)
+    except ProcessLookupError:
+        torrent_info["hls_process_paused"] = False
+        return False
+
+    torrent_info["hls_process_paused"] = False
+    return True
+
+
+async def _pace_ffmpeg_process(torrent_id, torrent_info, process, file_index, hls_output_dir, source_file_path, start_segment):
     last_reprioritized_offset = -1
     tick = 0
     while process.returncode is None:
         tick += 1
-        downloaded_bytes = _get_file_progress_bytes(torrent_info["handle"], file_index)
+        if _is_torrent_complete(torrent_info):
+            if _resume_paused_ffmpeg(torrent_info, process):
+                logging.info("Resumed FFmpeg for %s because torrent is complete", torrent_id)
+            logging.info("Stopping FFmpeg pacing for %s because torrent is complete", torrent_id)
+            return
+
         bytes_per_second = torrent_info.get("stream_bytes_per_second", APPROX_BYTES_PER_SECOND)
-        estimated_read_offset = _estimated_read_offset_bytes(start_segment, hls_output_dir, bytes_per_second)
+        read_offset = _get_process_file_offset(process, source_file_path)
+        if read_offset is None:
+            read_offset = _estimated_read_offset_bytes(start_segment, hls_output_dir, bytes_per_second)
 
-        if abs(estimated_read_offset - last_reprioritized_offset) >= FFMPEG_REPRIO_STEP_BYTES:
-            _reprioritize_for_offset(torrent_info, file_index, estimated_read_offset)
-            last_reprioritized_offset = estimated_read_offset
+        if abs(read_offset - last_reprioritized_offset) >= FFMPEG_REPRIO_STEP_BYTES:
+            _reprioritize_for_offset(torrent_info, file_index, read_offset)
+            last_reprioritized_offset = read_offset
 
-        if downloaded_bytes is not None:
-            ahead_bytes = downloaded_bytes - estimated_read_offset
-            is_paused = torrent_info.get("hls_process_paused", False)
+        is_paused = torrent_info.get("hls_process_paused", False)
+        min_window_available = _is_byte_range_available(
+            torrent_info,
+            file_index,
+            read_offset,
+            FFMPEG_MIN_AHEAD_BYTES,
+        )
+        resume_window_available = _is_byte_range_available(
+            torrent_info,
+            file_index,
+            read_offset,
+            FFMPEG_RESUME_AHEAD_BYTES,
+        ) if is_paused else min_window_available
 
-            if not is_paused and ahead_bytes < FFMPEG_MIN_AHEAD_BYTES:
-                try:
-                    os.kill(process.pid, signal.SIGSTOP)
-                    torrent_info["hls_process_paused"] = True
-                    logging.info(
-                        "Paused FFmpeg for %s (ahead=%.1f MiB)",
-                        torrent_id,
-                        ahead_bytes / (1024 * 1024),
-                    )
-                except ProcessLookupError:
-                    break
-            elif is_paused and ahead_bytes >= FFMPEG_RESUME_AHEAD_BYTES:
-                try:
-                    os.kill(process.pid, signal.SIGCONT)
-                    torrent_info["hls_process_paused"] = False
-                    logging.info(
-                        "Resumed FFmpeg for %s (ahead=%.1f MiB)",
-                        torrent_id,
-                        ahead_bytes / (1024 * 1024),
-                    )
-                except ProcessLookupError:
-                    break
-
-            if tick % 5 == 0:
+        if not is_paused and not min_window_available:
+            try:
+                os.kill(process.pid, signal.SIGSTOP)
+                torrent_info["hls_process_paused"] = True
                 logging.info(
-                    "[pace:%s] bps=%.2f MB/s read=%.1f MiB downloaded=%.1f MiB ahead=%.1f MiB paused=%s",
+                    "Paused FFmpeg for %s (read=%.1f MiB, next %.0f MiB unavailable)",
                     torrent_id,
-                    bytes_per_second / (1024 * 1024),
-                    estimated_read_offset / (1024 * 1024),
-                    downloaded_bytes / (1024 * 1024),
-                    ahead_bytes / (1024 * 1024),
-                    torrent_info.get("hls_process_paused", False),
+                    read_offset / (1024 * 1024),
+                    FFMPEG_MIN_AHEAD_BYTES / (1024 * 1024),
                 )
+            except ProcessLookupError:
+                break
+        elif is_paused and resume_window_available:
+            try:
+                os.kill(process.pid, signal.SIGCONT)
+                torrent_info["hls_process_paused"] = False
+                logging.info(
+                    "Resumed FFmpeg for %s (read=%.1f MiB, next %.0f MiB available)",
+                    torrent_id,
+                    read_offset / (1024 * 1024),
+                    FFMPEG_RESUME_AHEAD_BYTES / (1024 * 1024),
+                )
+            except ProcessLookupError:
+                break
+
+        if tick % 20 == 0:
+            logging.info(
+                "[pace:%s] bps=%.2f MB/s read=%.1f MiB min_window=%s paused=%s",
+                torrent_id,
+                bytes_per_second / (1024 * 1024),
+                read_offset / (1024 * 1024),
+                min_window_available,
+                torrent_info.get("hls_process_paused", False),
+            )
 
         await asyncio.sleep(FFMPEG_PACE_CHECK_SECONDS)
 
@@ -419,6 +482,14 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         logging.info(f"Waiting for source file to exist: {source_file_path}")
         await asyncio.sleep(1)
 
+    _reprioritize_for_offset(torrent_info, video_file_index, 0)
+    await _wait_for_byte_range(
+        torrent_info,
+        video_file_index,
+        0,
+        min(video_file["size"], PROBE_BUFFER_BYTES),
+    )
+
     stream_bytes_per_second = await _estimate_bytes_per_second(source_file_path, APPROX_BYTES_PER_SECOND)
     torrent_info["stream_bytes_per_second"] = stream_bytes_per_second
     byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * stream_bytes_per_second
@@ -447,6 +518,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
             process,
             video_file_index,
             hls_output_dir,
+            source_file_path,
             start_segment,
         )
     )
