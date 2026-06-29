@@ -328,6 +328,29 @@
         let activeStreamUrl = null;
         let activeTorrentName = null;
         let seekInFlight = false;
+        let suppressSeekUntil = 0;
+        let lastBackendSeekSegment = null;
+        let lastBackendSeekAt = 0;
+
+        function releaseSeekGuard(delay = 800) {
+            window.setTimeout(() => {
+                seekInFlight = false;
+                suppressSeekUntil = Date.now() + 500;
+            }, delay);
+        }
+
+        function resetBackendSeekSegmentAfterPlaybackMoves() {
+            const videoPlayer = document.getElementById('videoPlayer');
+            if (lastBackendSeekSegment === null || Number.isNaN(videoPlayer.currentTime)) {
+                return;
+            }
+
+            const currentSegment = Math.max(0, Math.floor(videoPlayer.currentTime / 10));
+            if (currentSegment !== lastBackendSeekSegment) {
+                lastBackendSeekSegment = null;
+                lastBackendSeekAt = 0;
+            }
+        }
 
         // Add torrent form handler
         document.getElementById('addTorrentForm').addEventListener('submit', async (e) => {
@@ -460,13 +483,20 @@
         async function notifySeek() {
             const videoPlayer = document.getElementById('videoPlayer');
             const nowPlaying = document.getElementById('nowPlaying');
+            const now = Date.now();
 
-            if (seekInFlight || !activeTorrentId || !activeStreamUrl || Number.isNaN(videoPlayer.currentTime)) {
+            if (seekInFlight || now < suppressSeekUntil || !activeTorrentId || !activeStreamUrl || Number.isNaN(videoPlayer.currentTime)) {
                 return;
             }
 
             const segment = Math.max(0, Math.floor(videoPlayer.currentTime / 10));
+            if (segment === lastBackendSeekSegment) {
+                return;
+            }
+
             seekInFlight = true;
+            lastBackendSeekSegment = segment;
+            lastBackendSeekAt = now;
 
             try {
                 if (activeHls) {
@@ -485,16 +515,31 @@
                 }
 
                 if (activeHls) {
+                    let manifestParsed = false;
+                    const seekGuardTimeout = window.setTimeout(() => {
+                        if (!manifestParsed) {
+                            releaseSeekGuard(0);
+                        }
+                    }, 5000);
+
+                    const onManifestParsed = () => {
+                        manifestParsed = true;
+                        window.clearTimeout(seekGuardTimeout);
+                        activeHls.off(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+                        activeHls.startLoad();
+                        releaseSeekGuard();
+                    };
+
+                    activeHls.on(Hls.Events.MANIFEST_PARSED, onManifestParsed);
                     activeHls.loadSource(`${activeStreamUrl}?reload=${Date.now()}`);
-                    activeHls.startLoad();
                 } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
                     videoPlayer.src = `${activeStreamUrl}?reload=${Date.now()}`;
                     await videoPlayer.play();
+                    releaseSeekGuard();
                 }
             } catch (error) {
                 console.error('Seek notification failed:', error);
                 nowPlaying.textContent = `Seek failed: ${error.message}`;
-            } finally {
                 seekInFlight = false;
             }
         }
@@ -514,6 +559,10 @@
             activeTorrentId = torrentId;
             activeStreamUrl = streamUrl;
             activeTorrentName = torrentName;
+            seekInFlight = false;
+            suppressSeekUntil = Date.now() + 1000;
+            lastBackendSeekSegment = null;
+            lastBackendSeekAt = 0;
 
             nowPlaying.textContent = `Loading: ${torrentName}`;
             playerSection.style.display = 'block';
@@ -602,7 +651,9 @@
 
                 // Initialize
         document.addEventListener('DOMContentLoaded', () => {
-            document.getElementById('videoPlayer').addEventListener('seeking', notifySeek);
+            const videoPlayer = document.getElementById('videoPlayer');
+            videoPlayer.addEventListener('seeking', notifySeek);
+            videoPlayer.addEventListener('timeupdate', resetBackendSeekSegmentAfterPlaybackMoves);
             loadTorrents();
         });
 
