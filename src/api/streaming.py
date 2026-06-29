@@ -17,7 +17,7 @@ router = APIRouter()
 
 HLS_SEGMENT_DURATION_SECONDS = 10
 INITIAL_BUFFER_BYTES = 32 * 1024 * 1024
-SEEK_WINDOW_BYTES = 64 * 1024 * 1024
+SEEK_WINDOW_BYTES = 24 * 1024 * 1024
 APPROX_BYTES_PER_SECOND = 2_000_000
 SEEK_BUFFER_BYTES = 8 * 1024 * 1024
 INITIAL_BUFFER_WAIT_SECONDS = 60
@@ -92,6 +92,10 @@ def _reprioritize_for_offset(torrent_info, file_index, byte_offset):
         1,
     ).piece
 
+    current_priorities = list(handle.get_piece_priorities())
+    priorities = current_priorities[:]
+    changed = False
+
     file_end_piece = ti.map_file(file_index, file_entry.size - 1, 1).piece
     for piece in range(file_start_piece, file_end_piece + 1):
         if piece < current_piece:
@@ -100,7 +104,13 @@ def _reprioritize_for_offset(torrent_info, file_index, byte_offset):
             priority = 7
         else:
             priority = 4
-        handle.piece_priority(piece, priority)
+
+        if piece < len(priorities) and priorities[piece] != priority:
+            priorities[piece] = priority
+            changed = True
+
+    if changed:
+        handle.prioritize_pieces(priorities)
 
 
 def _get_piece_window(torrent_info, file_index, byte_offset, window_bytes):
