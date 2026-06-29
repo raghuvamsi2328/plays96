@@ -1,50 +1,56 @@
 # Torrent Streaming Server
 
-A Node.js server for streaming torrent content with automatic video file selection, FFmpeg remuxing, and container deployment support.
+A Python-based server for streaming torrent content with automatic video file selection, FFmpeg remuxing, and container deployment support.
 
 ## Features
 
 - **Auto Video Selection**: Automatically selects the best video file (MP4 > MKV > AVI priority)
-- **FFmpeg Remuxing**: Converts MKV/AVI files to MP4 for browser compatibility
-- **Auto Cleanup**: Removes torrents inactive for 12+ hours
+- **FFmpeg Remuxing**: Converts video files to HLS format for browser compatibility
+- **Auto Cleanup**: Removes inactive streams
 - **Docker Support**: Ready for container deployment
 - **Web Interface**: Built-in HTML test interface
-- **RESTful API**: Complete API for torrent management and streaming
+- **RESTful API**: Complete FastAPI-based API for torrent management and streaming
 
 ## Project Structure
 
 ```
-├── server.js                 # Main entry point
+├── app.py                   # Main FastAPI application entry point
 ├── src/
-│   ├── app.js                # Application setup and configuration
-│   ├── services/
-│   │   ├── TorrentService.js # Torrent management with PeerFlix
-│   │   └── StreamingService.js # Video streaming and FFmpeg handling
-│   ├── routes/
-│   │   ├── system.js         # Health and debug endpoints
-│   │   ├── torrents.js       # Torrent CRUD operations
-│   │   └── streaming.js      # Video streaming endpoints
-│   └── utils/
-│       └── helpers.js        # Utility functions
+│   ├── __init__.py         # Package initialization
+│   ├── background.py       # Background tasks (cleanup, alerts)
+│   ├── config.py           # Configuration settings
+│   ├── state.py           # Global state management
+│   ├── utils.py           # Utility functions
+│   └── api/
+│       ├── __init__.py    # API package initialization
+│       ├── streaming.py   # Video streaming endpoints
+│       └── torrents.py    # Torrent management endpoints
 ├── public/
-│   └── test.html            # Web interface for testing
-├── downloads/               # Torrent download directory
-├── Dockerfile              # Container build configuration
-├── docker-compose.yml      # Docker Compose setup
-└── index.js.backup         # Original monolithic version (backup)
+│   └── test.html         # Web interface for testing
+├── downloads/            # Torrent download directory
+├── hls/                 # HLS streaming directory
+├── Dockerfile           # Container build configuration
+└── docker-compose.yml   # Docker Compose setup
 ```
 
 ## Quick Start
 
 ### Local Development
 ```bash
-npm install
-npm run dev
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the server
+python app.py
 ```
 
 ### Production
 ```bash
-npm start
+uvicorn app:app --host 0.0.0.0 --port 6991
 ```
 
 ### Docker
@@ -53,83 +59,73 @@ docker build -t torrent-stream .
 docker run -p 6991:6991 torrent-stream
 ```
 
-### Docker Compose (Portainer)
+### Docker Compose
 ```bash
 docker-compose up -d
 ```
 
 ## API Endpoints
 
-### System
-- `GET /health` - Health check
-- `GET /debug` - Debug information
-
 ### Torrent Management
-- `POST /add-torrent` - Add new torrent
-- `GET /torrents` - List all torrents
-- `GET /torrent/:id` - Get torrent details
-- `DELETE /torrent/:id` - Remove torrent
+- `POST /api/torrents/` - Add new torrent
+- `GET /api/torrents/` - List all torrents
+- `GET /api/torrents/{torrent_id}` - Get torrent details
+- `DELETE /api/torrents/{torrent_id}` - Remove torrent
 
 ### Streaming
-- `GET /stream/:torrentId` - Stream auto-selected video file
-- `GET /stream/:torrentId/:fileIndex` - Stream specific file
+- `GET /api/stream/{torrent_id}` - Get HLS playlist
+- `GET /api/stream/{torrent_id}/{segment}` - Get HLS segment
 
 ## Auto Cleanup Feature
 
-The server automatically removes torrents that haven't been streamed for 12+ hours:
+The server automatically removes inactive streams:
 
-- **Check Interval**: Every hour
-- **Cleanup Threshold**: 12 hours of inactivity
-- **Activity Tracking**: Updates `lastStreamedAt` timestamp on each stream request
-- **Graceful Removal**: Properly destroys PeerFlix engines before removal
+- **Background Task**: Runs cleanup periodically
+- **Cleanup Threshold**: Based on inactivity period
+- **Activity Tracking**: Updates timestamps on stream access
+- **Graceful Removal**: Properly cleans up resources
 
-## Services Overview
+## Features Overview
 
-### TorrentService
-- Manages active torrents using PeerFlix
+### Torrent Management
+- Manages active torrents using libtorrent
 - Handles torrent lifecycle (add, remove, cleanup)
-- Provides clean data serialization (no circular references)
-- Auto-cleanup scheduler for inactive torrents
+- Auto-cleanup scheduler for inactive streams
+- Background alert listener for torrent events
 
-### StreamingService
+### Streaming Service
 - Auto-selects best video files
-- Handles FFmpeg remuxing for incompatible formats
-- Manages direct streaming for compatible formats
+- Handles FFmpeg conversion to HLS
+- Manages HLS playlist and segments
 - Sets appropriate streaming headers
 
 ## Configuration
 
 ### Environment Variables
 - `PORT` - Server port (default: 6991)
+- `DOWNLOAD_PATH` - Path for torrent downloads
+- `HLS_PATH` - Path for HLS segments
+- `WARM_CACHE_TIMEOUT_MINUTES` - Cleanup timeout
 
-### FFmpeg Paths
-- FFmpeg: `/usr/bin/ffmpeg`
-- FFprobe: `/usr/bin/ffprobe`
+### Dependencies
+- FFmpeg for video conversion
+- libtorrent for torrent handling
+- FastAPI for REST API
+- uvicorn for ASGI server
 
 ## Web Interface
 
-Access the test interface at: `http://localhost:6991/public/test.html`
+Access the test interface at: `http://localhost:6991/`
 
 Features:
 - Add torrents by magnet URI
 - View torrent status and progress
 - Auto-stream best video files
-- Manual file selection
+- Real-time status updates
 
-## Migration from Monolithic Version
-
-The original `index.js` has been refactored into a modular structure:
-
-1. **Services**: Core business logic separated into dedicated services
-2. **Routes**: API endpoints organized by functionality
-3. **Utils**: Common utilities and helpers
-4. **Auto Cleanup**: New 12-hour inactive torrent cleanup
-5. **Better Error Handling**: Improved error management across services
-
-The original file is preserved as `index.js.backup` for reference.
 ## Docker Deployment
 
-The application is containerized and ready for deployment in Portainer:
+The application is containerized with all dependencies:
 
 1. Port 6991 exposed
 2. FFmpeg included in container
@@ -139,16 +135,16 @@ The application is containerized and ready for deployment in Portainer:
 ## Troubleshooting
 
 ### Common Issues
-1. **FFmpeg not found**: Ensure FFmpeg is installed in container
+1. **FFmpeg not found**: Ensure FFmpeg is installed
 2. **Port conflicts**: Change PORT environment variable
-3. **Memory issues**: Monitor torrent cleanup and memory usage
-4. **Streaming issues**: Check PeerFlix server ports and connectivity
+3. **Memory issues**: Monitor stream cleanup
+4. **Streaming issues**: Check libtorrent configuration
 
 ### Logs
-- Server heartbeat every 30 seconds
-- Detailed torrent lifecycle logging
-- FFmpeg operation logging
-- Auto-cleanup operation logging
+- Background task execution logs
+- Torrent activity monitoring
+- FFmpeg conversion status
+- Cleanup operation logs
 
 ## Legal Notice
 

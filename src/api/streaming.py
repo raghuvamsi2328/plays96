@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import os
@@ -360,5 +361,4 @@ async def get_hls_segment(torrent_id: str, segment: str):
     # Update access time on segment access
     if torrent_id in active_torrents:
         active_torrents[torrent_id]["hls_last_accessed"] = datetime.now()
-        
-    return FileResponse(segment_path, media_type='video/MP2T')
+    return FileResponse(str(segment_path), media_type='video/MP2T')
