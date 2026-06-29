@@ -315,6 +315,8 @@
                 </video>
                 <p style="text-align: center; margin-top: 10px; color: #666;">
                     <span id="nowPlaying">No video selected</span>
+                    <br>
+                    <span id="playbackTime">Time: --:-- / --:--</span>
                 </p>
             </div>
         </div>
@@ -327,6 +329,7 @@
         let activeTorrentId = null;
         let activeStreamUrl = null;
         let activeTorrentName = null;
+        let activeMediaDurationSeconds = null;
         let streamOffsetSeconds = 0;
         let seekInFlight = false;
         let suppressSeekUntil = 0;
@@ -350,6 +353,56 @@
             if (currentSegment !== lastBackendSeekSegment) {
                 lastBackendSeekSegment = null;
                 lastBackendSeekAt = 0;
+            }
+        }
+
+        function formatDuration(seconds) {
+            if (!Number.isFinite(seconds) || seconds < 0) {
+                return '--:--';
+            }
+
+            const wholeSeconds = Math.floor(seconds);
+            const hours = Math.floor(wholeSeconds / 3600);
+            const minutes = Math.floor((wholeSeconds % 3600) / 60);
+            const remainingSeconds = wholeSeconds % 60;
+
+            if (hours > 0) {
+                return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+            }
+
+            return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+        }
+
+        function updatePlaybackTime() {
+            const playbackTime = document.getElementById('playbackTime');
+            const videoPlayer = document.getElementById('videoPlayer');
+            if (!playbackTime) {
+                return;
+            }
+
+            const localTime = Number.isFinite(videoPlayer.currentTime) ? videoPlayer.currentTime : 0;
+            const absoluteTime = Math.max(0, streamOffsetSeconds + localTime);
+            const shownTime = Number.isFinite(activeMediaDurationSeconds)
+                ? Math.min(absoluteTime, activeMediaDurationSeconds)
+                : absoluteTime;
+
+            playbackTime.textContent = `Time: ${formatDuration(shownTime)} / ${formatDuration(activeMediaDurationSeconds)}`;
+        }
+
+        async function loadStreamMetadata(torrentId) {
+            try {
+                const response = await fetch(`${API_BASE}/stream/${torrentId}/metadata`);
+                if (!response.ok) {
+                    return;
+                }
+
+                const metadata = await response.json();
+                activeMediaDurationSeconds = Number.isFinite(metadata.duration_seconds)
+                    ? metadata.duration_seconds
+                    : null;
+                updatePlaybackTime();
+            } catch (error) {
+                console.warn('Failed to load stream metadata:', error);
             }
         }
 
@@ -535,6 +588,8 @@
                         activeHls.off(Hls.Events.MANIFEST_PARSED, onManifestParsed);
                         streamOffsetSeconds = nextStreamOffsetSeconds;
                         videoPlayer.currentTime = 0;
+                        updatePlaybackTime();
+                        nowPlaying.textContent = `Now playing: ${activeTorrentName || activeTorrentId}`;
                         activeHls.startLoad();
                         releaseSeekGuard();
                     };
@@ -546,6 +601,8 @@
                     videoPlayer.src = `${activeStreamUrl}?reload=${Date.now()}`;
                     videoPlayer.onloadedmetadata = async function() {
                         videoPlayer.currentTime = 0;
+                        updatePlaybackTime();
+                        nowPlaying.textContent = `Now playing: ${activeTorrentName || activeTorrentId}`;
                         await videoPlayer.play();
                         releaseSeekGuard();
                     };
@@ -572,6 +629,7 @@
             activeTorrentId = torrentId;
             activeStreamUrl = streamUrl;
             activeTorrentName = torrentName;
+            activeMediaDurationSeconds = null;
             streamOffsetSeconds = 0;
             seekInFlight = false;
             suppressSeekUntil = Date.now() + 1000;
@@ -579,6 +637,8 @@
             lastBackendSeekAt = 0;
 
             nowPlaying.textContent = `Loading: ${torrentName}`;
+            updatePlaybackTime();
+            loadStreamMetadata(torrentId);
             playerSection.style.display = 'block';
             
             if (Hls.isSupported()) {
@@ -589,6 +649,10 @@
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
                     videoPlayer.play();
                     nowPlaying.textContent = `Now playing: ${torrentName}`;
+                    if (!Number.isFinite(activeMediaDurationSeconds)) {
+                        loadStreamMetadata(torrentId);
+                    }
+                    updatePlaybackTime();
                 });
                  hls.on(Hls.Events.ERROR, function (event, data) {
                     if (data.fatal) {
@@ -601,6 +665,10 @@
                 videoPlayer.onloadedmetadata = function() {
                     videoPlayer.play();
                     nowPlaying.textContent = `Now playing: ${torrentName}`;
+                    if (!Number.isFinite(activeMediaDurationSeconds)) {
+                        loadStreamMetadata(torrentId);
+                    }
+                    updatePlaybackTime();
                 };
             } else {
                 nowPlaying.textContent = 'HLS is not supported by your browser.';
@@ -668,6 +736,8 @@
             const videoPlayer = document.getElementById('videoPlayer');
             videoPlayer.addEventListener('seeking', notifySeek);
             videoPlayer.addEventListener('timeupdate', resetBackendSeekSegmentAfterPlaybackMoves);
+            videoPlayer.addEventListener('timeupdate', updatePlaybackTime);
+            videoPlayer.addEventListener('durationchange', updatePlaybackTime);
             loadTorrents();
         });
 

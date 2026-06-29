@@ -269,11 +269,30 @@ async def _wait_for_byte_range(
     raise HTTPException(status_code=503, detail=f"{wait_name} not ready")
 
 
-async def _estimate_bytes_per_second(source_file_path, fallback_bytes_per_second):
+def _playlist_exists(playlist_path):
+    path = Path(playlist_path)
+    return path.exists() and path.stat().st_size > 0
+
+
+def _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment):
+    if not _playlist_exists(playlist_path):
+        return False
+
+    if torrent_info.get("hls_start_segment", 0) != start_segment:
+        return False
+
+    process = torrent_info.get("hls_process")
+    if process and process.returncode is None:
+        return True
+
+    return _is_torrent_complete(torrent_info)
+
+
+async def _probe_media_info(source_file_path, fallback_bytes_per_second):
     ffprobe_cmd = [
         'ffprobe',
         '-v', 'error',
-        '-show_entries', 'format=bit_rate,duration,size',
+        '-show_entries', 'format=bit_rate,duration,size:stream=codec_type,codec_name',
         '-of', 'json',
         source_file_path,
     ]
@@ -287,38 +306,65 @@ async def _estimate_bytes_per_second(source_file_path, fallback_bytes_per_second
         stdout, stderr = await process.communicate()
     except FileNotFoundError:
         logging.warning("ffprobe not found; using fallback byte-rate estimate")
-        return fallback_bytes_per_second
+        return {"bytes_per_second": fallback_bytes_per_second, "duration_seconds": None, "video_codec": None}
 
     if process.returncode != 0:
         logging.warning("ffprobe failed (%s): %s", process.returncode, stderr.decode(errors='replace').strip())
-        return fallback_bytes_per_second
+        return {"bytes_per_second": fallback_bytes_per_second, "duration_seconds": None, "video_codec": None}
 
     try:
         payload = json.loads(stdout.decode(errors='replace'))
     except json.JSONDecodeError:
-        return fallback_bytes_per_second
+        return {"bytes_per_second": fallback_bytes_per_second, "duration_seconds": None, "video_codec": None}
+
+    video_codec = None
+    for stream in payload.get("streams", []):
+        if stream.get("codec_type") == "video":
+            video_codec = stream.get("codec_name")
+            break
 
     fmt = payload.get("format", {})
+    duration = fmt.get("duration")
+    size = fmt.get("size")
+    duration_seconds = None
+    size_i = None
+    try:
+        duration_f = float(duration)
+        if duration_f > 0:
+            duration_seconds = duration_f
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        size_i = int(size)
+    except (TypeError, ValueError):
+        pass
+
     bit_rate = fmt.get("bit_rate")
     if bit_rate:
         try:
             value = int(float(bit_rate) / 8)
             if value > 0:
-                return value
+                return {
+                    "bytes_per_second": value,
+                    "duration_seconds": duration_seconds,
+                    "video_codec": video_codec,
+                }
         except (TypeError, ValueError):
             pass
 
-    duration = fmt.get("duration")
-    size = fmt.get("size")
-    try:
-        duration_f = float(duration)
-        size_i = int(size)
-        if duration_f > 0 and size_i > 0:
-            return int(size_i / duration_f)
-    except (TypeError, ValueError, ZeroDivisionError):
-        pass
+    if duration_seconds and size_i and size_i > 0:
+        return {
+            "bytes_per_second": int(size_i / duration_seconds),
+            "duration_seconds": duration_seconds,
+            "video_codec": video_codec,
+        }
 
-    return fallback_bytes_per_second
+    return {
+        "bytes_per_second": fallback_bytes_per_second,
+        "duration_seconds": duration_seconds,
+        "video_codec": video_codec,
+    }
 
 
 async def _terminate_hls_process(torrent_info):
@@ -358,7 +404,7 @@ def _clear_hls_output_dir(hls_output_dir):
             existing_path.unlink()
 
 
-def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment):
+def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment, video_codec=None):
     ffmpeg_cmd = [
         'ffmpeg',
         '-hide_banner',
@@ -375,10 +421,24 @@ def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_pat
     ffmpeg_cmd.extend([
         '-i', source_file_path,
         '-c:a', 'aac',
-        '-c:v', 'copy',
+    ])
+
+    if video_codec in {"hevc", "h265"}:
+        ffmpeg_cmd.extend([
+            '-c:v', 'libx264',
+            '-preset', 'veryfast',
+            '-crf', '23',
+        ])
+    else:
+        ffmpeg_cmd.extend([
+            '-c:v', 'copy',
+        ])
+
+    ffmpeg_cmd.extend([
         '-f', 'hls',
         '-hls_time', str(HLS_SEGMENT_DURATION_SECONDS),
         '-hls_list_size', '0',
+        '-hls_playlist_type', 'vod',
         '-hls_flags', 'independent_segments',
         '-hls_segment_type', 'mpegts',
         '-hls_base_url', f'/api/stream/{torrent_id}/',
@@ -591,8 +651,11 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         wait_name="HLS probe buffer",
     )
 
-    stream_bytes_per_second = await _estimate_bytes_per_second(source_file_path, APPROX_BYTES_PER_SECOND)
+    media_info = await _probe_media_info(source_file_path, APPROX_BYTES_PER_SECOND)
+    stream_bytes_per_second = media_info["bytes_per_second"]
     torrent_info["stream_bytes_per_second"] = stream_bytes_per_second
+    torrent_info["stream_duration_seconds"] = media_info["duration_seconds"]
+    torrent_info["stream_video_codec"] = media_info["video_codec"]
     byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * stream_bytes_per_second
     _reprioritize_for_offset(torrent_info, video_file_index, byte_offset)
 
@@ -607,7 +670,14 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
             wait_name="HLS seek buffer",
         )
 
-    ffmpeg_cmd = _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment)
+    ffmpeg_cmd = _build_ffmpeg_cmd(
+        torrent_id,
+        source_file_path,
+        hls_output_dir,
+        playlist_path,
+        start_segment,
+        video_codec=torrent_info.get("stream_video_codec"),
+    )
     logging.info(f"Starting FFmpeg for {torrent_id}: {' '.join(ffmpeg_cmd)}")
     process = await asyncio.create_subprocess_exec(
         *ffmpeg_cmd,
@@ -684,7 +754,9 @@ async def get_hls_playlist(torrent_id: str, request: Request):
 
     playlist_path = os.path.join(HLS_PATH, torrent_id, "stream.m3u8")
     async with _get_torrent_lock(torrent_info):
-        if not torrent_info.get("hls_process") or torrent_info["hls_process"].returncode is not None:
+        if _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment=0):
+            logging.debug("Reusing existing HLS playlist for %s", torrent_id)
+        else:
             logging.info(f"HLS process not running for {torrent_id}. Starting now.")
             playlist_path = await _start_hls_process(torrent_id, torrent_info, start_segment=0)
 
@@ -716,6 +788,41 @@ async def notify_seek(torrent_id: str, segment: int = Query(..., ge=0)):
 
     torrent_info["hls_last_accessed"] = datetime.now()
     return {"ok": True, "seek_offset_seconds": segment * HLS_SEGMENT_DURATION_SECONDS}
+
+
+@router.get("/{torrent_id}/metadata")
+async def get_stream_metadata(torrent_id: str):
+    torrent_id = torrent_id.lower()
+    torrent_info = active_torrents.get(torrent_id)
+    if not torrent_info:
+        raise HTTPException(status_code=404, detail="Torrent not found")
+
+    video_file, video_file_index = _get_video_file_and_index(torrent_info)
+    if not video_file:
+        raise HTTPException(status_code=404, detail="No video file found in torrent.")
+
+    if video_file_index is not None:
+        torrent_info["video_file_index"] = video_file_index
+
+    source_file_path = os.path.join(DOWNLOAD_PATH, video_file["name"])
+    if (
+        torrent_info.get("stream_duration_seconds") is None
+        or torrent_info.get("stream_video_codec") is None
+        or torrent_info.get("stream_bytes_per_second") is None
+    ) and os.path.exists(source_file_path):
+        media_info = await _probe_media_info(source_file_path, APPROX_BYTES_PER_SECOND)
+        torrent_info["stream_bytes_per_second"] = media_info["bytes_per_second"]
+        torrent_info["stream_duration_seconds"] = media_info["duration_seconds"]
+        torrent_info["stream_video_codec"] = media_info["video_codec"]
+
+    return {
+        "torrent_id": torrent_id,
+        "file_name": video_file.get("name"),
+        "file_size": video_file.get("size"),
+        "duration_seconds": torrent_info.get("stream_duration_seconds"),
+        "video_codec": torrent_info.get("stream_video_codec"),
+        "bytes_per_second": torrent_info.get("stream_bytes_per_second"),
+    }
 
 @router.get("/{torrent_id}/{segment}")
 async def get_hls_segment(torrent_id: str, segment: str):
