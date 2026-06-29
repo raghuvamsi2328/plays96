@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.api import streaming, torrents
-from src.background import alert_listener, cleanup_inactive_streams
+from src.background import alert_listener, cleanup_inactive_streams, log_download_speeds
 from src.config import DOWNLOAD_PATH, HLS_PATH, PORT
 from src.state import get_session
 
@@ -71,6 +71,7 @@ async def startup_event():
     try:
         asyncio.create_task(alert_listener())
         asyncio.create_task(cleanup_inactive_streams())
+        asyncio.create_task(log_download_speeds())
         logger.info("Background tasks started ✓")
     except Exception as e:
         logger.error(f"Error starting background tasks: {e}")

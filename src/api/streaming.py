@@ -194,7 +194,7 @@ def _clear_hls_output_dir(hls_output_dir):
             existing_path.unlink()
 
 
-def _build_ffmpeg_cmd(source_file_path, hls_output_dir, playlist_path, start_segment):
+def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment):
     ffmpeg_cmd = [
         'ffmpeg',
         '-hide_banner',
@@ -217,11 +217,23 @@ def _build_ffmpeg_cmd(source_file_path, hls_output_dir, playlist_path, start_seg
         '-hls_list_size', '0',
         '-hls_flags', 'independent_segments',
         '-hls_segment_type', 'mpegts',
+        '-hls_base_url', f'/api/stream/{torrent_id}/',
         '-start_number', str(start_segment),
         '-hls_segment_filename', os.path.join(hls_output_dir, 'segment%03d.ts'),
         playlist_path,
     ])
     return ffmpeg_cmd
+
+
+async def _log_ffmpeg_stderr(process, torrent_id):
+    if not process.stderr:
+        return
+
+    while True:
+        line = await process.stderr.readline()
+        if not line:
+            break
+        logging.warning(f"[ffmpeg:{torrent_id}] {line.decode(errors='replace').rstrip()}")
 
 
 async def _start_hls_process(torrent_id, torrent_info, start_segment):
@@ -262,15 +274,16 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     else:
         await _wait_for_byte_range(torrent_info, video_file_index, byte_offset, SEEK_BUFFER_BYTES)
 
-    ffmpeg_cmd = _build_ffmpeg_cmd(source_file_path, hls_output_dir, playlist_path, start_segment)
+    ffmpeg_cmd = _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment)
     logging.info(f"Starting FFmpeg for {torrent_id}: {' '.join(ffmpeg_cmd)}")
     process = await asyncio.create_subprocess_exec(
         *ffmpeg_cmd,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
     torrent_info["hls_process"] = process
     torrent_info["hls_start_segment"] = start_segment
+    asyncio.create_task(_log_ffmpeg_stderr(process, torrent_id))
 
     return playlist_path
 
@@ -347,11 +360,9 @@ async def notify_seek(torrent_id: str, segment: int = Query(..., ge=0)):
     torrent_info = active_torrents.get(torrent_id)
     if not torrent_info:
         raise HTTPException(status_code=404, detail="Torrent not found")
-
     video_file_index = torrent_info.get("video_file_index")
     if video_file_index is None:
         _, video_file_index = _get_video_file_and_index(torrent_info)
-
     if video_file_index is None:
         raise HTTPException(status_code=409, detail="Video file not ready")
 

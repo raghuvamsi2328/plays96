@@ -94,3 +94,27 @@ async def cleanup_inactive_streams():
                     logging.info(f"Deleted HLS directory: {hls_output_dir}")
                     
                 # Don't pause the torrent - let it continue downloading
+
+
+async def log_download_speeds(interval_seconds=5):
+    """Periodically logs torrent download rates for stream diagnostics."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        for torrent_id, torrent_info in list(active_torrents.items()):
+            handle = torrent_info.get("handle")
+            if not handle or not handle.is_valid():
+                continue
+
+            try:
+                status = handle.status()
+            except RuntimeError:
+                continue
+
+            logging.info(
+                "[%s] rate=%.1f KB/s peers=%s state=%s progress=%.1f%%",
+                torrent_id,
+                status.download_rate / 1024,
+                status.num_peers,
+                status.state,
+                status.progress * 100,
+            )
