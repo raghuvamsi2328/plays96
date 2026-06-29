@@ -290,7 +290,7 @@ def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_pat
         '-hls_flags', 'independent_segments',
         '-hls_segment_type', 'mpegts',
         '-hls_base_url', f'/api/stream/{torrent_id}/',
-        '-start_number', str(start_segment),
+        '-start_number', '0',
         '-hls_segment_filename', os.path.join(hls_output_dir, 'segment%03d.ts'),
         playlist_path,
     ])
@@ -323,10 +323,11 @@ def _latest_segment_index(hls_output_dir):
 def _estimated_read_offset_bytes(start_segment, hls_output_dir, bytes_per_second):
     latest_segment = _latest_segment_index(hls_output_dir)
     if latest_segment is None:
-        segment_index = start_segment
+        relative_segment_index = 0
     else:
-        segment_index = max(start_segment, latest_segment + 1)
+        relative_segment_index = latest_segment + 1
 
+    segment_index = start_segment + relative_segment_index
     return segment_index * HLS_SEGMENT_DURATION_SECONDS * bytes_per_second
 
 
@@ -535,7 +536,7 @@ async def notify_seek(torrent_id: str, segment: int = Query(..., ge=0)):
         await _start_hls_process(torrent_id, torrent_info, start_segment=segment)
 
     torrent_info["hls_last_accessed"] = datetime.now()
-    return {"ok": True}
+    return {"ok": True, "seek_offset_seconds": segment * HLS_SEGMENT_DURATION_SECONDS}
 
 @router.get("/{torrent_id}/{segment}")
 async def get_hls_segment(torrent_id: str, segment: str):

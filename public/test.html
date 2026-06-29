@@ -327,6 +327,7 @@
         let activeTorrentId = null;
         let activeStreamUrl = null;
         let activeTorrentName = null;
+        let streamOffsetSeconds = 0;
         let seekInFlight = false;
         let suppressSeekUntil = 0;
         let lastBackendSeekSegment = null;
@@ -345,7 +346,7 @@
                 return;
             }
 
-            const currentSegment = Math.max(0, Math.floor(videoPlayer.currentTime / 10));
+            const currentSegment = Math.max(0, Math.floor((streamOffsetSeconds + videoPlayer.currentTime) / 10));
             if (currentSegment !== lastBackendSeekSegment) {
                 lastBackendSeekSegment = null;
                 lastBackendSeekAt = 0;
@@ -489,7 +490,8 @@
                 return;
             }
 
-            const segment = Math.max(0, Math.floor(videoPlayer.currentTime / 10));
+            const targetAbsoluteTime = streamOffsetSeconds + videoPlayer.currentTime;
+            const segment = Math.max(0, Math.floor(targetAbsoluteTime / 10));
             if (segment === lastBackendSeekSegment) {
                 return;
             }
@@ -514,6 +516,11 @@
                     throw new Error(result.detail || 'Seek restart failed');
                 }
 
+                const result = await response.json().catch(() => ({}));
+                const nextStreamOffsetSeconds = Number.isFinite(result.seek_offset_seconds)
+                    ? result.seek_offset_seconds
+                    : segment * 10;
+
                 if (activeHls) {
                     let manifestParsed = false;
                     const seekGuardTimeout = window.setTimeout(() => {
@@ -526,6 +533,8 @@
                         manifestParsed = true;
                         window.clearTimeout(seekGuardTimeout);
                         activeHls.off(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+                        streamOffsetSeconds = nextStreamOffsetSeconds;
+                        videoPlayer.currentTime = 0;
                         activeHls.startLoad();
                         releaseSeekGuard();
                     };
@@ -533,9 +542,13 @@
                     activeHls.on(Hls.Events.MANIFEST_PARSED, onManifestParsed);
                     activeHls.loadSource(`${activeStreamUrl}?reload=${Date.now()}`);
                 } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                    streamOffsetSeconds = nextStreamOffsetSeconds;
                     videoPlayer.src = `${activeStreamUrl}?reload=${Date.now()}`;
-                    await videoPlayer.play();
-                    releaseSeekGuard();
+                    videoPlayer.onloadedmetadata = async function() {
+                        videoPlayer.currentTime = 0;
+                        await videoPlayer.play();
+                        releaseSeekGuard();
+                    };
                 }
             } catch (error) {
                 console.error('Seek notification failed:', error);
@@ -559,6 +572,7 @@
             activeTorrentId = torrentId;
             activeStreamUrl = streamUrl;
             activeTorrentName = torrentName;
+            streamOffsetSeconds = 0;
             seekInFlight = false;
             suppressSeekUntil = Date.now() + 1000;
             lastBackendSeekSegment = null;
