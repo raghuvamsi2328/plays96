@@ -18,17 +18,19 @@ from src.utils import get_largest_video_file
 router = APIRouter()
 
 HLS_SEGMENT_DURATION_SECONDS = 10
-INITIAL_BUFFER_BYTES = 128 * 1024 * 1024
-SEEK_WINDOW_BYTES = 24 * 1024 * 1024
+MIN_STARTUP_BUFFER_BYTES = 8 * 1024 * 1024
+MAX_STARTUP_BUFFER_BYTES = 32 * 1024 * 1024
+STARTUP_BUFFER_SEGMENTS = 2
+SEEK_WINDOW_BYTES = 64 * 1024 * 1024
 APPROX_BYTES_PER_SECOND = 2_000_000
-SEEK_BUFFER_BYTES = 128 * 1024 * 1024
-PROBE_BUFFER_BYTES = 16 * 1024 * 1024
+SEEK_BUFFER_BYTES = 32 * 1024 * 1024
+PROBE_BUFFER_BYTES = 4 * 1024 * 1024
 INITIAL_BUFFER_WAIT_SECONDS = 60
 PLAYLIST_WAIT_SECONDS = 30
 SEGMENT_WAIT_SECONDS = 30
 FFMPEG_PACE_CHECK_SECONDS = 0.25
-FFMPEG_MIN_AHEAD_BYTES = 128 * 1024 * 1024
-FFMPEG_RESUME_AHEAD_BYTES = 256 * 1024 * 1024
+FFMPEG_MIN_AHEAD_BYTES = 16 * 1024 * 1024
+FFMPEG_RESUME_AHEAD_BYTES = 32 * 1024 * 1024
 FFMPEG_REPRIO_STEP_BYTES = 8 * 1024 * 1024
 
 
@@ -58,8 +60,13 @@ def _are_pieces_available(handle, start_piece, end_piece):
     except RuntimeError:
         return False
 
-    if pieces is not None:
-        if start_piece < 0 or end_piece >= len(pieces):
+    try:
+        piece_count = len(pieces) if pieces is not None else 0
+    except TypeError:
+        piece_count = 0
+
+    if piece_count > 0:
+        if start_piece < 0 or end_piece >= piece_count:
             return False
 
         return all(pieces[piece] for piece in range(start_piece, end_piece + 1))
@@ -138,6 +145,63 @@ def _get_piece_window(torrent_info, file_index, byte_offset, window_bytes):
     return start_piece, end_piece
 
 
+def _get_startup_buffer_bytes(file_size, bytes_per_second):
+    target_bytes = bytes_per_second * HLS_SEGMENT_DURATION_SECONDS * STARTUP_BUFFER_SEGMENTS
+    target_bytes = max(MIN_STARTUP_BUFFER_BYTES, target_bytes)
+    target_bytes = min(MAX_STARTUP_BUFFER_BYTES, target_bytes)
+    return min(file_size, int(target_bytes))
+
+
+def _get_piece_window_status(torrent_info, file_index, byte_offset, window_bytes):
+    start_piece, end_piece = _get_piece_window(torrent_info, file_index, byte_offset, window_bytes)
+    if start_piece is None or end_piece is None:
+        return None, None, 0, 0
+
+    handle = torrent_info["handle"]
+    total = end_piece - start_piece + 1
+    try:
+        pieces = getattr(handle.status(), "pieces", None)
+    except RuntimeError:
+        return start_piece, end_piece, 0, total
+
+    available = 0
+    for piece in range(start_piece, end_piece + 1):
+        try:
+            piece_count = len(pieces) if pieces is not None else 0
+            if piece_count > 0:
+                has_piece = piece < piece_count and pieces[piece]
+            else:
+                has_piece = handle.have_piece(piece)
+        except (AttributeError, RuntimeError, TypeError):
+            has_piece = False
+
+        if has_piece:
+            available += 1
+
+    return start_piece, end_piece, available, total
+
+
+def _request_piece_window(torrent_info, file_index, byte_offset, window_bytes):
+    start_piece, end_piece = _get_piece_window(torrent_info, file_index, byte_offset, window_bytes)
+    if start_piece is None or end_piece is None:
+        return
+
+    handle = torrent_info["handle"]
+    _reprioritize_for_offset(torrent_info, file_index, byte_offset)
+    for piece in range(start_piece, end_piece + 1):
+        try:
+            handle.set_piece_deadline(piece, (piece - start_piece) * 250)
+        except (AttributeError, RuntimeError, TypeError):
+            return
+
+
+def _enable_streaming_download_mode(handle):
+    try:
+        handle.set_sequential_download(True)
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+
+
 def _is_byte_range_available(torrent_info, file_index, byte_offset, window_bytes):
     if _is_torrent_complete(torrent_info):
         return True
@@ -153,21 +217,56 @@ async def _wait_for_initial_buffer(torrent_info, file_index, file_size):
     if file_index is None or file_size <= 0:
         return
 
-    await _wait_for_byte_range(torrent_info, file_index, 0, min(file_size, INITIAL_BUFFER_BYTES))
+    bytes_per_second = torrent_info.get("stream_bytes_per_second", APPROX_BYTES_PER_SECOND)
+    await _wait_for_byte_range(
+        torrent_info,
+        file_index,
+        0,
+        _get_startup_buffer_bytes(file_size, bytes_per_second),
+        wait_name="HLS startup buffer",
+    )
 
 
-async def _wait_for_byte_range(torrent_info, file_index, byte_offset, window_bytes):
+async def _wait_for_byte_range(
+    torrent_info,
+    file_index,
+    byte_offset,
+    window_bytes,
+    wait_name="HLS byte range",
+    timeout_seconds=INITIAL_BUFFER_WAIT_SECONDS,
+):
     if file_index is None:
         return
 
-    deadline = asyncio.get_running_loop().time() + INITIAL_BUFFER_WAIT_SECONDS
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    next_log_time = 0
+    _request_piece_window(torrent_info, file_index, byte_offset, window_bytes)
 
-    while asyncio.get_running_loop().time() < deadline:
+    while loop.time() < deadline:
         if _is_byte_range_available(torrent_info, file_index, byte_offset, window_bytes):
             return
+        if loop.time() >= next_log_time:
+            start_piece, end_piece, available, total = _get_piece_window_status(
+                torrent_info,
+                file_index,
+                byte_offset,
+                window_bytes,
+            )
+            logging.info(
+                "Waiting for %s at %.1f MiB: pieces %s/%s (%s-%s)",
+                wait_name,
+                byte_offset / (1024 * 1024),
+                available,
+                total,
+                start_piece,
+                end_piece,
+            )
+            _request_piece_window(torrent_info, file_index, byte_offset, window_bytes)
+            next_log_time = loop.time() + 5
         await asyncio.sleep(1)
 
-    raise HTTPException(status_code=503, detail="Seek target buffer not ready")
+    raise HTTPException(status_code=503, detail=f"{wait_name} not ready")
 
 
 async def _estimate_bytes_per_second(source_file_path, fallback_bytes_per_second):
@@ -464,6 +563,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     priorities = [1] * len(torrent_info["files"])
     priorities[video_file_index] = 7
     handle.prioritize_files(priorities)
+    _enable_streaming_download_mode(handle)
 
     torrent_info["video_file_index"] = video_file_index
 
@@ -488,6 +588,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         video_file_index,
         0,
         min(video_file["size"], PROBE_BUFFER_BYTES),
+        wait_name="HLS probe buffer",
     )
 
     stream_bytes_per_second = await _estimate_bytes_per_second(source_file_path, APPROX_BYTES_PER_SECOND)
@@ -498,7 +599,13 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     if start_segment == 0:
         await _wait_for_initial_buffer(torrent_info, video_file_index, video_file["size"])
     else:
-        await _wait_for_byte_range(torrent_info, video_file_index, byte_offset, SEEK_BUFFER_BYTES)
+        await _wait_for_byte_range(
+            torrent_info,
+            video_file_index,
+            byte_offset,
+            SEEK_BUFFER_BYTES,
+            wait_name="HLS seek buffer",
+        )
 
     ffmpeg_cmd = _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment)
     logging.info(f"Starting FFmpeg for {torrent_id}: {' '.join(ffmpeg_cmd)}")
