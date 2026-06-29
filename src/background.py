@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import signal
 import shutil
 from datetime import datetime, timedelta
 
@@ -76,8 +77,20 @@ async def cleanup_inactive_streams():
                 
                 # Kill ffmpeg process
                 process = torrent_info.get("hls_process")
+                pacer_task = torrent_info.get("hls_pacer_task")
+                if pacer_task and not pacer_task.done():
+                    pacer_task.cancel()
+                torrent_info["hls_pacer_task"] = None
+
                 if process and process.returncode is None:
                     try:
+                        if torrent_info.get("hls_process_paused"):
+                            try:
+                                os.kill(process.pid, signal.SIGCONT)
+                            except ProcessLookupError:
+                                pass
+                            torrent_info["hls_process_paused"] = False
+
                         process.terminate()
                         await process.wait()
                         logging.info(f"Terminated ffmpeg process for {torrent_id}")
@@ -85,6 +98,7 @@ async def cleanup_inactive_streams():
                         pass # Process already dead
                 
                 torrent_info["hls_process"] = None
+                torrent_info["hls_process_paused"] = False
                 torrent_info["hls_last_accessed"] = None
                 
                 # Delete HLS files

@@ -1,7 +1,9 @@
 
 import asyncio
+import json
 import logging
 import os
+import signal
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +25,10 @@ SEEK_BUFFER_BYTES = 8 * 1024 * 1024
 INITIAL_BUFFER_WAIT_SECONDS = 60
 PLAYLIST_WAIT_SECONDS = 30
 SEGMENT_WAIT_SECONDS = 30
+FFMPEG_PACE_CHECK_SECONDS = 1
+FFMPEG_MIN_AHEAD_BYTES = 24 * 1024 * 1024
+FFMPEG_RESUME_AHEAD_BYTES = 48 * 1024 * 1024
+FFMPEG_REPRIO_STEP_BYTES = 8 * 1024 * 1024
 
 
 def _get_video_file_and_index(torrent_info):
@@ -171,11 +177,76 @@ async def _wait_for_byte_range(torrent_info, file_index, byte_offset, window_byt
     raise HTTPException(status_code=503, detail="Seek target buffer not ready")
 
 
+async def _estimate_bytes_per_second(source_file_path, fallback_bytes_per_second):
+    ffprobe_cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-show_entries', 'format=bit_rate,duration,size',
+        '-of', 'json',
+        source_file_path,
+    ]
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *ffprobe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except FileNotFoundError:
+        logging.warning("ffprobe not found; using fallback byte-rate estimate")
+        return fallback_bytes_per_second
+
+    if process.returncode != 0:
+        logging.warning("ffprobe failed (%s): %s", process.returncode, stderr.decode(errors='replace').strip())
+        return fallback_bytes_per_second
+
+    try:
+        payload = json.loads(stdout.decode(errors='replace'))
+    except json.JSONDecodeError:
+        return fallback_bytes_per_second
+
+    fmt = payload.get("format", {})
+    bit_rate = fmt.get("bit_rate")
+    if bit_rate:
+        try:
+            value = int(float(bit_rate) / 8)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    duration = fmt.get("duration")
+    size = fmt.get("size")
+    try:
+        duration_f = float(duration)
+        size_i = int(size)
+        if duration_f > 0 and size_i > 0:
+            return int(size_i / duration_f)
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+
+    return fallback_bytes_per_second
+
+
 async def _terminate_hls_process(torrent_info):
+    pacer_task = torrent_info.get("hls_pacer_task")
+    if pacer_task and not pacer_task.done():
+        pacer_task.cancel()
+    torrent_info["hls_pacer_task"] = None
+
     process = torrent_info.get("hls_process")
     if not process or process.returncode is not None:
         torrent_info["hls_process"] = None
+        torrent_info["hls_process_paused"] = False
         return
+
+    if torrent_info.get("hls_process_paused"):
+        try:
+            os.kill(process.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+        torrent_info["hls_process_paused"] = False
 
     process.terminate()
     try:
@@ -185,6 +256,7 @@ async def _terminate_hls_process(torrent_info):
         await process.wait()
     finally:
         torrent_info["hls_process"] = None
+        torrent_info["hls_process_paused"] = False
 
 
 def _clear_hls_output_dir(hls_output_dir):
@@ -236,6 +308,82 @@ async def _log_ffmpeg_stderr(process, torrent_id):
         logging.warning(f"[ffmpeg:{torrent_id}] {line.decode(errors='replace').rstrip()}")
 
 
+def _latest_segment_index(hls_output_dir):
+    latest = None
+    for segment_path in Path(hls_output_dir).glob("segment*.ts"):
+        name = segment_path.stem
+        suffix = name.replace("segment", "")
+        if suffix.isdigit():
+            segment_num = int(suffix)
+            if latest is None or segment_num > latest:
+                latest = segment_num
+    return latest
+
+
+def _estimated_read_offset_bytes(start_segment, hls_output_dir, bytes_per_second):
+    latest_segment = _latest_segment_index(hls_output_dir)
+    if latest_segment is None:
+        segment_index = start_segment
+    else:
+        segment_index = max(start_segment, latest_segment + 1)
+
+    return segment_index * HLS_SEGMENT_DURATION_SECONDS * bytes_per_second
+
+
+async def _pace_ffmpeg_process(torrent_id, torrent_info, process, file_index, hls_output_dir, start_segment):
+    last_reprioritized_offset = -1
+    tick = 0
+    while process.returncode is None:
+        tick += 1
+        downloaded_bytes = _get_file_progress_bytes(torrent_info["handle"], file_index)
+        bytes_per_second = torrent_info.get("stream_bytes_per_second", APPROX_BYTES_PER_SECOND)
+        estimated_read_offset = _estimated_read_offset_bytes(start_segment, hls_output_dir, bytes_per_second)
+
+        if abs(estimated_read_offset - last_reprioritized_offset) >= FFMPEG_REPRIO_STEP_BYTES:
+            _reprioritize_for_offset(torrent_info, file_index, estimated_read_offset)
+            last_reprioritized_offset = estimated_read_offset
+
+        if downloaded_bytes is not None:
+            ahead_bytes = downloaded_bytes - estimated_read_offset
+            is_paused = torrent_info.get("hls_process_paused", False)
+
+            if not is_paused and ahead_bytes < FFMPEG_MIN_AHEAD_BYTES:
+                try:
+                    os.kill(process.pid, signal.SIGSTOP)
+                    torrent_info["hls_process_paused"] = True
+                    logging.info(
+                        "Paused FFmpeg for %s (ahead=%.1f MiB)",
+                        torrent_id,
+                        ahead_bytes / (1024 * 1024),
+                    )
+                except ProcessLookupError:
+                    break
+            elif is_paused and ahead_bytes >= FFMPEG_RESUME_AHEAD_BYTES:
+                try:
+                    os.kill(process.pid, signal.SIGCONT)
+                    torrent_info["hls_process_paused"] = False
+                    logging.info(
+                        "Resumed FFmpeg for %s (ahead=%.1f MiB)",
+                        torrent_id,
+                        ahead_bytes / (1024 * 1024),
+                    )
+                except ProcessLookupError:
+                    break
+
+            if tick % 5 == 0:
+                logging.info(
+                    "[pace:%s] bps=%.2f MB/s read=%.1f MiB downloaded=%.1f MiB ahead=%.1f MiB paused=%s",
+                    torrent_id,
+                    bytes_per_second / (1024 * 1024),
+                    estimated_read_offset / (1024 * 1024),
+                    downloaded_bytes / (1024 * 1024),
+                    ahead_bytes / (1024 * 1024),
+                    torrent_info.get("hls_process_paused", False),
+                )
+
+        await asyncio.sleep(FFMPEG_PACE_CHECK_SECONDS)
+
+
 async def _start_hls_process(torrent_id, torrent_info, start_segment):
     handle = torrent_info["handle"]
     if handle.status().paused:
@@ -255,7 +403,8 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
 
     torrent_info["video_file_index"] = video_file_index
 
-    byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * APPROX_BYTES_PER_SECOND
+    stream_bytes_per_second = torrent_info.get("stream_bytes_per_second", APPROX_BYTES_PER_SECOND)
+    byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * stream_bytes_per_second
     _reprioritize_for_offset(torrent_info, video_file_index, byte_offset)
 
     await _terminate_hls_process(torrent_info)
@@ -268,6 +417,11 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     while not os.path.exists(source_file_path):
         logging.info(f"Waiting for source file to exist: {source_file_path}")
         await asyncio.sleep(1)
+
+    stream_bytes_per_second = await _estimate_bytes_per_second(source_file_path, APPROX_BYTES_PER_SECOND)
+    torrent_info["stream_bytes_per_second"] = stream_bytes_per_second
+    byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * stream_bytes_per_second
+    _reprioritize_for_offset(torrent_info, video_file_index, byte_offset)
 
     if start_segment == 0:
         await _wait_for_initial_buffer(torrent_info, video_file_index, video_file["size"])
@@ -283,7 +437,18 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     )
     torrent_info["hls_process"] = process
     torrent_info["hls_start_segment"] = start_segment
+    torrent_info["hls_process_paused"] = False
     asyncio.create_task(_log_ffmpeg_stderr(process, torrent_id))
+    torrent_info["hls_pacer_task"] = asyncio.create_task(
+        _pace_ffmpeg_process(
+            torrent_id,
+            torrent_info,
+            process,
+            video_file_index,
+            hls_output_dir,
+            start_segment,
+        )
+    )
 
     return playlist_path
 
