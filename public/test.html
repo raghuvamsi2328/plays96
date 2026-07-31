@@ -335,6 +335,17 @@
         let suppressSeekUntil = 0;
         let lastBackendSeekSegment = null;
         let lastBackendSeekAt = 0;
+        const HLS_CONFIG = {
+            manifestLoadingTimeOut: 120000,
+            manifestLoadingMaxRetry: 3,
+            manifestLoadingRetryDelay: 2000,
+            manifestLoadingMaxRetryTimeout: 10000,
+            levelLoadingTimeOut: 60000,
+            fragLoadingTimeOut: 60000,
+            fragLoadingMaxRetry: 4,
+            fragLoadingRetryDelay: 1000,
+            fragLoadingMaxRetryTimeout: 8000,
+        };
 
         function releaseSeekGuard(delay = 800) {
             window.setTimeout(() => {
@@ -642,7 +653,7 @@
             playerSection.style.display = 'block';
             
             if (Hls.isSupported()) {
-                const hls = new Hls();
+                const hls = new Hls(HLS_CONFIG);
                 activeHls = hls;
                 hls.loadSource(streamUrl);
                 hls.attachMedia(videoPlayer);

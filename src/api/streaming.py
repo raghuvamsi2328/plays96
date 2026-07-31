@@ -311,9 +311,6 @@ def _playlist_exists(playlist_path):
 
 
 def _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment):
-    if not _playlist_exists(playlist_path):
-        return False
-
     if torrent_info.get("hls_command_version") != HLS_COMMAND_VERSION:
         return False
 
@@ -323,6 +320,9 @@ def _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment):
     process = torrent_info.get("hls_process")
     if process and process.returncode is None:
         return True
+
+    if not _playlist_exists(playlist_path):
+        return False
 
     return _is_torrent_complete(torrent_info)
 
