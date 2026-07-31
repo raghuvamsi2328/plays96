@@ -18,6 +18,7 @@ from src.utils import get_largest_video_file
 router = APIRouter()
 
 HLS_SEGMENT_DURATION_SECONDS = 10
+HLS_COMMAND_VERSION = 2
 MIN_STARTUP_BUFFER_BYTES = 8 * 1024 * 1024
 MAX_STARTUP_BUFFER_BYTES = 32 * 1024 * 1024
 STARTUP_BUFFER_SEGMENTS = 2
@@ -32,6 +33,41 @@ FFMPEG_PACE_CHECK_SECONDS = 0.25
 FFMPEG_MIN_AHEAD_BYTES = 16 * 1024 * 1024
 FFMPEG_RESUME_AHEAD_BYTES = 32 * 1024 * 1024
 FFMPEG_REPRIO_STEP_BYTES = 8 * 1024 * 1024
+HLS_MPEGTS_REMUX_VIDEO_CODECS = {"h264", "hevc", "h265", "mpeg2video"}
+HLS_MPEGTS_VIDEO_BITSTREAM_FILTERS = {
+    "h264": "h264_mp4toannexb",
+    "hevc": "hevc_mp4toannexb",
+    "h265": "hevc_mp4toannexb",
+}
+
+
+def _normalize_codec_name(codec_name):
+    if not isinstance(codec_name, str):
+        return None
+    return codec_name.strip().lower() or None
+
+
+def _get_hls_video_mode(video_codec):
+    normalized_codec = _normalize_codec_name(video_codec)
+    if normalized_codec in HLS_MPEGTS_REMUX_VIDEO_CODECS:
+        return "copy"
+    return "transcode"
+
+
+def _get_hls_video_args(video_codec):
+    normalized_codec = _normalize_codec_name(video_codec)
+    if _get_hls_video_mode(normalized_codec) == "copy":
+        video_args = ['-c:v', 'copy']
+        bitstream_filter = HLS_MPEGTS_VIDEO_BITSTREAM_FILTERS.get(normalized_codec)
+        if bitstream_filter:
+            video_args.extend(['-bsf:v', bitstream_filter])
+        return video_args
+
+    return [
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '23',
+    ]
 
 
 def _get_video_file_and_index(torrent_info):
@@ -278,6 +314,9 @@ def _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment):
     if not _playlist_exists(playlist_path):
         return False
 
+    if torrent_info.get("hls_command_version") != HLS_COMMAND_VERSION:
+        return False
+
     if torrent_info.get("hls_start_segment", 0) != start_segment:
         return False
 
@@ -422,17 +461,7 @@ def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_pat
         '-i', source_file_path,
         '-c:a', 'aac',
     ])
-
-    if video_codec in {"hevc", "h265"}:
-        ffmpeg_cmd.extend([
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-crf', '23',
-        ])
-    else:
-        ffmpeg_cmd.extend([
-            '-c:v', 'copy',
-        ])
+    ffmpeg_cmd.extend(_get_hls_video_args(video_codec))
 
     ffmpeg_cmd.extend([
         '-f', 'hls',
@@ -656,6 +685,12 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     torrent_info["stream_bytes_per_second"] = stream_bytes_per_second
     torrent_info["stream_duration_seconds"] = media_info["duration_seconds"]
     torrent_info["stream_video_codec"] = media_info["video_codec"]
+    logging.info(
+        "HLS media probe for %s: video_codec=%s video_mode=%s",
+        torrent_id,
+        torrent_info.get("stream_video_codec"),
+        _get_hls_video_mode(torrent_info.get("stream_video_codec")),
+    )
     byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * stream_bytes_per_second
     _reprioritize_for_offset(torrent_info, video_file_index, byte_offset)
 
@@ -686,6 +721,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     )
     torrent_info["hls_process"] = process
     torrent_info["hls_start_segment"] = start_segment
+    torrent_info["hls_command_version"] = HLS_COMMAND_VERSION
     torrent_info["hls_process_paused"] = False
     asyncio.create_task(_log_ffmpeg_stderr(process, torrent_id))
     torrent_info["hls_pacer_task"] = asyncio.create_task(
@@ -821,6 +857,7 @@ async def get_stream_metadata(torrent_id: str):
         "file_size": video_file.get("size"),
         "duration_seconds": torrent_info.get("stream_duration_seconds"),
         "video_codec": torrent_info.get("stream_video_codec"),
+        "video_mode": _get_hls_video_mode(torrent_info.get("stream_video_codec")),
         "bytes_per_second": torrent_info.get("stream_bytes_per_second"),
     }
 
