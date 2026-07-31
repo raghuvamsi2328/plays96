@@ -18,7 +18,7 @@ from src.utils import get_largest_video_file
 router = APIRouter()
 
 HLS_SEGMENT_DURATION_SECONDS = 10
-HLS_COMMAND_VERSION = 3
+HLS_COMMAND_VERSION = 4
 MIN_STARTUP_BUFFER_BYTES = 8 * 1024 * 1024
 MAX_STARTUP_BUFFER_BYTES = 32 * 1024 * 1024
 STARTUP_BUFFER_SEGMENTS = 2
@@ -40,7 +40,7 @@ HLS_MPEGTS_VIDEO_BITSTREAM_FILTERS = {
     "hevc": "hevc_mp4toannexb",
     "h265": "hevc_mp4toannexb",
 }
-HLS_VIDEO_COPY_EXTENSIONS = {".mp4", ".m4v", ".mov"}
+HLS_AUDIO_COPY_CODECS = {"aac"}
 
 
 def _normalize_codec_name(codec_name):
@@ -51,8 +51,7 @@ def _normalize_codec_name(codec_name):
 
 def _get_hls_video_mode(video_codec, source_file_path=None):
     normalized_codec = _normalize_codec_name(video_codec)
-    source_extension = Path(source_file_path).suffix.lower() if source_file_path else None
-    if normalized_codec in HLS_MPEGTS_REMUX_VIDEO_CODECS and source_extension in HLS_VIDEO_COPY_EXTENSIONS:
+    if normalized_codec in HLS_MPEGTS_REMUX_VIDEO_CODECS:
         return "copy"
     return "transcode"
 
@@ -72,6 +71,45 @@ def _get_hls_video_args(video_codec, source_file_path=None):
         '-crf', '23',
         '-pix_fmt', 'yuv420p',
     ]
+
+
+def _get_hls_audio_mode(audio_codec):
+    normalized_codec = _normalize_codec_name(audio_codec)
+    if normalized_codec is None:
+        return "none"
+    if normalized_codec in HLS_AUDIO_COPY_CODECS:
+        return "copy"
+    return "transcode"
+
+
+def _get_hls_audio_args(audio_codec, audio_stream_index=None):
+    audio_map = f"0:{audio_stream_index}" if audio_stream_index is not None else "0:a:0?"
+    audio_args = ['-map', audio_map]
+
+    if _get_hls_audio_mode(audio_codec) == "copy":
+        audio_args.extend(['-c:a', 'copy'])
+    else:
+        audio_args.extend(['-c:a', 'aac', '-ac', '2', '-b:a', '160k'])
+
+    return audio_args
+
+
+def _build_media_info(
+    bytes_per_second,
+    duration_seconds=None,
+    video_codec=None,
+    audio_codec=None,
+    audio_stream_index=None,
+    audio_channels=None,
+):
+    return {
+        "bytes_per_second": bytes_per_second,
+        "duration_seconds": duration_seconds,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
+        "audio_stream_index": audio_stream_index,
+        "audio_channels": audio_channels,
+    }
 
 
 def _get_video_file_and_index(torrent_info):
@@ -335,7 +373,7 @@ async def _probe_media_info(source_file_path, fallback_bytes_per_second):
     ffprobe_cmd = [
         'ffprobe',
         '-v', 'error',
-        '-show_entries', 'format=bit_rate,duration,size:stream=codec_type,codec_name',
+        '-show_entries', 'format=bit_rate,duration,size:stream=index,codec_type,codec_name,channels',
         '-of', 'json',
         source_file_path,
     ]
@@ -349,22 +387,35 @@ async def _probe_media_info(source_file_path, fallback_bytes_per_second):
         stdout, stderr = await process.communicate()
     except FileNotFoundError:
         logging.warning("ffprobe not found; using fallback byte-rate estimate")
-        return {"bytes_per_second": fallback_bytes_per_second, "duration_seconds": None, "video_codec": None}
+        return _build_media_info(fallback_bytes_per_second)
 
     if process.returncode != 0:
         logging.warning("ffprobe failed (%s): %s", process.returncode, stderr.decode(errors='replace').strip())
-        return {"bytes_per_second": fallback_bytes_per_second, "duration_seconds": None, "video_codec": None}
+        return _build_media_info(fallback_bytes_per_second)
 
     try:
         payload = json.loads(stdout.decode(errors='replace'))
     except json.JSONDecodeError:
-        return {"bytes_per_second": fallback_bytes_per_second, "duration_seconds": None, "video_codec": None}
+        return _build_media_info(fallback_bytes_per_second)
 
     video_codec = None
+    fallback_audio_stream = None
+    selected_audio_stream = None
     for stream in payload.get("streams", []):
         if stream.get("codec_type") == "video":
             video_codec = stream.get("codec_name")
-            break
+        elif stream.get("codec_type") == "audio":
+            if fallback_audio_stream is None:
+                fallback_audio_stream = stream
+            if _normalize_codec_name(stream.get("codec_name")) in HLS_AUDIO_COPY_CODECS and selected_audio_stream is None:
+                selected_audio_stream = stream
+
+    if selected_audio_stream is None:
+        selected_audio_stream = fallback_audio_stream
+
+    audio_codec = selected_audio_stream.get("codec_name") if selected_audio_stream else None
+    audio_stream_index = selected_audio_stream.get("index") if selected_audio_stream else None
+    audio_channels = selected_audio_stream.get("channels") if selected_audio_stream else None
 
     fmt = payload.get("format", {})
     duration = fmt.get("duration")
@@ -388,26 +439,35 @@ async def _probe_media_info(source_file_path, fallback_bytes_per_second):
         try:
             value = int(float(bit_rate) / 8)
             if value > 0:
-                return {
-                    "bytes_per_second": value,
-                    "duration_seconds": duration_seconds,
-                    "video_codec": video_codec,
-                }
+                return _build_media_info(
+                    value,
+                    duration_seconds=duration_seconds,
+                    video_codec=video_codec,
+                    audio_codec=audio_codec,
+                    audio_stream_index=audio_stream_index,
+                    audio_channels=audio_channels,
+                )
         except (TypeError, ValueError):
             pass
 
     if duration_seconds and size_i and size_i > 0:
-        return {
-            "bytes_per_second": int(size_i / duration_seconds),
-            "duration_seconds": duration_seconds,
-            "video_codec": video_codec,
-        }
+        return _build_media_info(
+            int(size_i / duration_seconds),
+            duration_seconds=duration_seconds,
+            video_codec=video_codec,
+            audio_codec=audio_codec,
+            audio_stream_index=audio_stream_index,
+            audio_channels=audio_channels,
+        )
 
-    return {
-        "bytes_per_second": fallback_bytes_per_second,
-        "duration_seconds": duration_seconds,
-        "video_codec": video_codec,
-    }
+    return _build_media_info(
+        fallback_bytes_per_second,
+        duration_seconds=duration_seconds,
+        video_codec=video_codec,
+        audio_codec=audio_codec,
+        audio_stream_index=audio_stream_index,
+        audio_channels=audio_channels,
+    )
 
 
 async def _terminate_hls_process(torrent_info):
@@ -494,7 +554,16 @@ def _describe_process(process):
     return f"pid={process.pid} returncode={process.returncode}"
 
 
-def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment, video_codec=None):
+def _build_ffmpeg_cmd(
+    torrent_id,
+    source_file_path,
+    hls_output_dir,
+    playlist_path,
+    start_segment,
+    video_codec=None,
+    audio_codec=None,
+    audio_stream_index=None,
+):
     ffmpeg_cmd = [
         'ffmpeg',
         '-hide_banner',
@@ -512,13 +581,10 @@ def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_pat
     ffmpeg_cmd.extend([
         '-i', source_file_path,
         '-map', '0:v:0',
-        '-map', '0:a:0?',
         '-dn',
         '-sn',
-        '-c:a', 'aac',
-        '-ac', '2',
-        '-b:a', '160k',
     ])
+    ffmpeg_cmd.extend(_get_hls_audio_args(audio_codec, audio_stream_index))
     ffmpeg_cmd.extend(_get_hls_video_args(video_codec, source_file_path))
 
     ffmpeg_cmd.extend([
@@ -776,11 +842,18 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     torrent_info["stream_bytes_per_second"] = stream_bytes_per_second
     torrent_info["stream_duration_seconds"] = media_info["duration_seconds"]
     torrent_info["stream_video_codec"] = media_info["video_codec"]
+    torrent_info["stream_audio_codec"] = media_info["audio_codec"]
+    torrent_info["stream_audio_stream_index"] = media_info["audio_stream_index"]
+    torrent_info["stream_audio_channels"] = media_info["audio_channels"]
     logging.info(
-        "HLS media probe for %s: video_codec=%s video_mode=%s bytes_per_second=%s duration_seconds=%s",
+        "HLS media probe for %s: video_codec=%s video_mode=%s audio_codec=%s audio_mode=%s audio_stream_index=%s audio_channels=%s bytes_per_second=%s duration_seconds=%s",
         torrent_id,
         torrent_info.get("stream_video_codec"),
         _get_hls_video_mode(torrent_info.get("stream_video_codec"), source_file_path),
+        torrent_info.get("stream_audio_codec"),
+        _get_hls_audio_mode(torrent_info.get("stream_audio_codec")),
+        torrent_info.get("stream_audio_stream_index"),
+        torrent_info.get("stream_audio_channels"),
         torrent_info.get("stream_bytes_per_second"),
         torrent_info.get("stream_duration_seconds"),
     )
@@ -805,6 +878,8 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         playlist_path,
         start_segment,
         video_codec=torrent_info.get("stream_video_codec"),
+        audio_codec=torrent_info.get("stream_audio_codec"),
+        audio_stream_index=torrent_info.get("stream_audio_stream_index"),
     )
     logging.info(
         "HLS FFmpeg inputs for %s: start_segment=%s source=%s playlist=%s output_dir=%s",
@@ -1010,6 +1085,9 @@ async def get_stream_metadata(torrent_id: str):
         torrent_info["stream_bytes_per_second"] = media_info["bytes_per_second"]
         torrent_info["stream_duration_seconds"] = media_info["duration_seconds"]
         torrent_info["stream_video_codec"] = media_info["video_codec"]
+        torrent_info["stream_audio_codec"] = media_info["audio_codec"]
+        torrent_info["stream_audio_stream_index"] = media_info["audio_stream_index"]
+        torrent_info["stream_audio_channels"] = media_info["audio_channels"]
 
     return {
         "torrent_id": torrent_id,
@@ -1018,6 +1096,10 @@ async def get_stream_metadata(torrent_id: str):
         "duration_seconds": torrent_info.get("stream_duration_seconds"),
         "video_codec": torrent_info.get("stream_video_codec"),
         "video_mode": _get_hls_video_mode(torrent_info.get("stream_video_codec"), source_file_path),
+        "audio_codec": torrent_info.get("stream_audio_codec"),
+        "audio_mode": _get_hls_audio_mode(torrent_info.get("stream_audio_codec")),
+        "audio_stream_index": torrent_info.get("stream_audio_stream_index"),
+        "audio_channels": torrent_info.get("stream_audio_channels"),
         "bytes_per_second": torrent_info.get("stream_bytes_per_second"),
     }
 
