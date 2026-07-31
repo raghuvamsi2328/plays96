@@ -27,8 +27,9 @@ APPROX_BYTES_PER_SECOND = 2_000_000
 SEEK_BUFFER_BYTES = 32 * 1024 * 1024
 PROBE_BUFFER_BYTES = 4 * 1024 * 1024
 INITIAL_BUFFER_WAIT_SECONDS = 60
-PLAYLIST_WAIT_SECONDS = 30
+PLAYLIST_WAIT_SECONDS = 120
 SEGMENT_WAIT_SECONDS = 30
+HLS_ARTIFACT_LOG_SECONDS = 5
 FFMPEG_PACE_CHECK_SECONDS = 0.25
 FFMPEG_MIN_AHEAD_BYTES = 16 * 1024 * 1024
 FFMPEG_RESUME_AHEAD_BYTES = 32 * 1024 * 1024
@@ -443,6 +444,53 @@ def _clear_hls_output_dir(hls_output_dir):
             existing_path.unlink()
 
 
+def _describe_path(path):
+    path = Path(path)
+    try:
+        stat_result = path.stat()
+    except FileNotFoundError:
+        return f"{path} (missing)"
+    except OSError as exc:
+        return f"{path} (stat_error={exc})"
+
+    path_type = "dir" if path.is_dir() else "file"
+    modified_at = datetime.fromtimestamp(stat_result.st_mtime).isoformat(timespec="seconds")
+    return f"{path} ({path_type}, size={stat_result.st_size}B, mtime={modified_at})"
+
+
+def _describe_directory_entries(directory_path, max_entries=12):
+    directory_path = Path(directory_path)
+    try:
+        if not directory_path.exists():
+            return f"{directory_path} (missing)"
+        if not directory_path.is_dir():
+            return f"{directory_path} (not_directory)"
+        entries = sorted(directory_path.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        return f"{directory_path} (list_error={exc})"
+
+    descriptions = []
+    for entry in entries[:max_entries]:
+        try:
+            stat_result = entry.stat()
+            suffix = "/" if entry.is_dir() else ""
+            descriptions.append(f"{entry.name}{suffix}:{stat_result.st_size}B")
+        except OSError as exc:
+            descriptions.append(f"{entry.name}:stat_error={exc}")
+
+    if len(entries) > max_entries:
+        descriptions.append(f"+{len(entries) - max_entries} more")
+
+    entries_text = ", ".join(descriptions) if descriptions else "empty"
+    return f"{directory_path} [{entries_text}]"
+
+
+def _describe_process(process):
+    if not process:
+        return "process=None"
+    return f"pid={process.pid} returncode={process.returncode}"
+
+
 def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_path, start_segment, video_codec=None):
     ffmpeg_cmd = [
         'ffmpeg',
@@ -459,6 +507,10 @@ def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_pat
 
     ffmpeg_cmd.extend([
         '-i', source_file_path,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        '-dn',
+        '-sn',
         '-c:a', 'aac',
     ])
     ffmpeg_cmd.extend(_get_hls_video_args(video_codec))
@@ -480,6 +532,7 @@ def _build_ffmpeg_cmd(torrent_id, source_file_path, hls_output_dir, playlist_pat
 
 async def _log_ffmpeg_stderr(process, torrent_id):
     if not process.stderr:
+        logging.warning("FFmpeg stderr unavailable for %s pid=%s", torrent_id, process.pid)
         return
 
     while True:
@@ -487,6 +540,26 @@ async def _log_ffmpeg_stderr(process, torrent_id):
         if not line:
             break
         logging.warning(f"[ffmpeg:{torrent_id}] {line.decode(errors='replace').rstrip()}")
+
+    logging.info(
+        "FFmpeg stderr closed for %s pid=%s returncode=%s",
+        torrent_id,
+        process.pid,
+        process.returncode,
+    )
+
+
+async def _watch_ffmpeg_exit(process, torrent_id, hls_output_dir, playlist_path):
+    returncode = await process.wait()
+    log = logging.info if returncode == 0 else logging.warning
+    log(
+        "FFmpeg exited for %s pid=%s returncode=%s playlist=%s output_dir=%s",
+        torrent_id,
+        process.pid,
+        returncode,
+        _describe_path(playlist_path),
+        _describe_directory_entries(hls_output_dir),
+    )
 
 
 def _latest_segment_index(hls_output_dir):
@@ -665,11 +738,23 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     hls_output_dir = os.path.join(HLS_PATH, torrent_id)
     playlist_path = os.path.join(hls_output_dir, "stream.m3u8")
     _clear_hls_output_dir(hls_output_dir)
+    logging.info(
+        "Prepared HLS output for %s: playlist=%s output_dir=%s",
+        torrent_id,
+        playlist_path,
+        _describe_directory_entries(hls_output_dir),
+    )
 
     source_file_path = os.path.join(DOWNLOAD_PATH, video_file["name"])
     while not os.path.exists(source_file_path):
         logging.info(f"Waiting for source file to exist: {source_file_path}")
         await asyncio.sleep(1)
+    logging.info(
+        "HLS source ready for %s: source=%s expected_torrent_file_size=%s",
+        torrent_id,
+        _describe_path(source_file_path),
+        video_file.get("size"),
+    )
 
     _reprioritize_for_offset(torrent_info, video_file_index, 0)
     await _wait_for_byte_range(
@@ -686,10 +771,12 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     torrent_info["stream_duration_seconds"] = media_info["duration_seconds"]
     torrent_info["stream_video_codec"] = media_info["video_codec"]
     logging.info(
-        "HLS media probe for %s: video_codec=%s video_mode=%s",
+        "HLS media probe for %s: video_codec=%s video_mode=%s bytes_per_second=%s duration_seconds=%s",
         torrent_id,
         torrent_info.get("stream_video_codec"),
         _get_hls_video_mode(torrent_info.get("stream_video_codec")),
+        torrent_info.get("stream_bytes_per_second"),
+        torrent_info.get("stream_duration_seconds"),
     )
     byte_offset = start_segment * HLS_SEGMENT_DURATION_SECONDS * stream_bytes_per_second
     _reprioritize_for_offset(torrent_info, video_file_index, byte_offset)
@@ -713,6 +800,14 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         start_segment,
         video_codec=torrent_info.get("stream_video_codec"),
     )
+    logging.info(
+        "HLS FFmpeg inputs for %s: start_segment=%s source=%s playlist=%s output_dir=%s",
+        torrent_id,
+        start_segment,
+        _describe_path(source_file_path),
+        playlist_path,
+        _describe_directory_entries(hls_output_dir),
+    )
     logging.info(f"Starting FFmpeg for {torrent_id}: {' '.join(ffmpeg_cmd)}")
     process = await asyncio.create_subprocess_exec(
         *ffmpeg_cmd,
@@ -723,7 +818,15 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
     torrent_info["hls_start_segment"] = start_segment
     torrent_info["hls_command_version"] = HLS_COMMAND_VERSION
     torrent_info["hls_process_paused"] = False
+    logging.info(
+        "FFmpeg started for %s: pid=%s playlist=%s output_dir=%s",
+        torrent_id,
+        process.pid,
+        playlist_path,
+        _describe_directory_entries(hls_output_dir),
+    )
     asyncio.create_task(_log_ffmpeg_stderr(process, torrent_id))
+    asyncio.create_task(_watch_ffmpeg_exit(process, torrent_id, hls_output_dir, playlist_path))
     torrent_info["hls_pacer_task"] = asyncio.create_task(
         _pace_ffmpeg_process(
             torrent_id,
@@ -740,15 +843,58 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
 
 
 async def _wait_for_hls_artifact(path, timeout_seconds, process=None, artifact_name="artifact"):
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while asyncio.get_running_loop().time() < deadline:
+    path = Path(path)
+    loop = asyncio.get_running_loop()
+    start_time = loop.time()
+    deadline = start_time + timeout_seconds
+    next_log_time = start_time
+
+    while loop.time() < deadline:
         if path.exists() and path.stat().st_size > 0:
+            elapsed_seconds = loop.time() - start_time
+            if artifact_name == "playlist" or elapsed_seconds >= 1:
+                logging.info(
+                    "HLS %s ready after %.1fs: path=%s process=%s output_dir=%s",
+                    artifact_name,
+                    elapsed_seconds,
+                    _describe_path(path),
+                    _describe_process(process),
+                    _describe_directory_entries(path.parent),
+                )
             return
         if process and process.returncode is not None:
+            logging.error(
+                "FFmpeg exited before HLS %s was ready: path=%s process=%s output_dir=%s",
+                artifact_name,
+                _describe_path(path),
+                _describe_process(process),
+                _describe_directory_entries(path.parent),
+            )
             raise HTTPException(status_code=500, detail=f"FFmpeg exited before {artifact_name} was ready")
+
+        now = loop.time()
+        if now >= next_log_time:
+            logging.info(
+                "Waiting for HLS %s: elapsed=%.1fs timeout=%ss path=%s process=%s output_dir=%s",
+                artifact_name,
+                now - start_time,
+                timeout_seconds,
+                _describe_path(path),
+                _describe_process(process),
+                _describe_directory_entries(path.parent),
+            )
+            next_log_time = now + HLS_ARTIFACT_LOG_SECONDS
         await asyncio.sleep(1)
 
-    raise HTTPException(status_code=404, detail=f"{artifact_name.capitalize()} not ready")
+    logging.warning(
+        "Timed out waiting for HLS %s after %ss: path=%s process=%s output_dir=%s",
+        artifact_name,
+        timeout_seconds,
+        _describe_path(path),
+        _describe_process(process),
+        _describe_directory_entries(path.parent),
+    )
+    raise HTTPException(status_code=503, detail=f"{artifact_name.capitalize()} not ready")
 
 @router.get("/{torrent_id}")
 async def get_hls_playlist(torrent_id: str, request: Request):
@@ -763,6 +909,8 @@ async def get_hls_playlist(torrent_id: str, request: Request):
 
     # Update access time
     torrent_info["hls_last_accessed"] = datetime.now()
+    client_host = request.client.host if request.client else "unknown"
+    logging.info("HLS playlist requested for %s from %s", torrent_id, client_host)
 
     # Find the main video file
     video_file, video_file_index = _get_video_file_and_index(torrent_info)
@@ -791,7 +939,13 @@ async def get_hls_playlist(torrent_id: str, request: Request):
     playlist_path = os.path.join(HLS_PATH, torrent_id, "stream.m3u8")
     async with _get_torrent_lock(torrent_info):
         if _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment=0):
-            logging.debug("Reusing existing HLS playlist for %s", torrent_id)
+            logging.info(
+                "Reusing HLS state for %s: playlist=%s process=%s output_dir=%s",
+                torrent_id,
+                _describe_path(playlist_path),
+                _describe_process(torrent_info.get("hls_process")),
+                _describe_directory_entries(Path(playlist_path).parent),
+            )
         else:
             logging.info(f"HLS process not running for {torrent_id}. Starting now.")
             playlist_path = await _start_hls_process(torrent_id, torrent_info, start_segment=0)
