@@ -585,6 +585,7 @@
                 const nextStreamOffsetSeconds = Number.isFinite(result.seek_offset_seconds)
                     ? result.seek_offset_seconds
                     : segment * 10;
+                const nextStreamUrl = `${activeStreamUrl}?segment=${segment}&reload=${Date.now()}`;
 
                 if (activeHls) {
                     let manifestParsed = false;
@@ -607,10 +608,10 @@
                     };
 
                     activeHls.on(Hls.Events.MANIFEST_PARSED, onManifestParsed);
-                    activeHls.loadSource(`${activeStreamUrl}?reload=${Date.now()}`);
+                    activeHls.loadSource(nextStreamUrl);
                 } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
                     streamOffsetSeconds = nextStreamOffsetSeconds;
-                    videoPlayer.src = `${activeStreamUrl}?reload=${Date.now()}`;
+                    videoPlayer.src = nextStreamUrl;
                     videoPlayer.onloadedmetadata = async function() {
                         videoPlayer.currentTime = 0;
                         updatePlaybackTime();

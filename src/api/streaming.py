@@ -9,7 +9,7 @@ from pathlib import Path
 
 import libtorrent as lt
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from src.config import DOWNLOAD_PATH, HLS_PATH
 from src.state import active_torrents
@@ -18,7 +18,7 @@ from src.utils import get_largest_video_file
 router = APIRouter()
 
 HLS_SEGMENT_DURATION_SECONDS = 10
-HLS_COMMAND_VERSION = 4
+HLS_COMMAND_VERSION = 5
 MIN_STARTUP_BUFFER_BYTES = 8 * 1024 * 1024
 MAX_STARTUP_BUFFER_BYTES = 32 * 1024 * 1024
 STARTUP_BUFFER_SEGMENTS = 2
@@ -563,6 +563,7 @@ def _build_ffmpeg_cmd(
     video_codec=None,
     audio_codec=None,
     audio_stream_index=None,
+    realtime_input=False,
 ):
     ffmpeg_cmd = [
         'ffmpeg',
@@ -577,6 +578,9 @@ def _build_ffmpeg_cmd(
         ffmpeg_cmd.extend([
             '-ss', str(start_segment * HLS_SEGMENT_DURATION_SECONDS),
         ])
+
+    if realtime_input:
+        ffmpeg_cmd.append('-re')
 
     ffmpeg_cmd.extend([
         '-i', source_file_path,
@@ -871,6 +875,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
             wait_name="HLS seek buffer",
         )
 
+    realtime_input = not _is_torrent_complete(torrent_info)
     ffmpeg_cmd = _build_ffmpeg_cmd(
         torrent_id,
         source_file_path,
@@ -880,11 +885,13 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         video_codec=torrent_info.get("stream_video_codec"),
         audio_codec=torrent_info.get("stream_audio_codec"),
         audio_stream_index=torrent_info.get("stream_audio_stream_index"),
+        realtime_input=realtime_input,
     )
     logging.info(
-        "HLS FFmpeg inputs for %s: start_segment=%s source=%s playlist=%s output_dir=%s",
+        "HLS FFmpeg inputs for %s: start_segment=%s input_mode=%s source=%s playlist=%s output_dir=%s",
         torrent_id,
         start_segment,
+        "realtime" if realtime_input else "fast",
         _describe_path(source_file_path),
         playlist_path,
         _describe_directory_entries(hls_output_dir),
@@ -977,8 +984,38 @@ async def _wait_for_hls_artifact(path, timeout_seconds, process=None, artifact_n
     )
     raise HTTPException(status_code=503, detail=f"{artifact_name.capitalize()} not ready")
 
+
+async def _read_hls_playlist_snapshot(playlist_path):
+    path = Path(playlist_path)
+    for _ in range(5):
+        try:
+            initial_size = path.stat().st_size
+            content = path.read_bytes()
+            final_size = path.stat().st_size
+        except FileNotFoundError:
+            await asyncio.sleep(0.05)
+            continue
+        except OSError as exc:
+            logging.warning("Failed to read HLS playlist snapshot %s: %s", playlist_path, exc)
+            raise HTTPException(status_code=503, detail="Playlist not ready")
+
+        if initial_size > 0 and initial_size == final_size and len(content) == final_size:
+            return content
+
+        await asyncio.sleep(0.05)
+
+    raise HTTPException(status_code=503, detail="Playlist not ready")
+
+
+def _hls_playlist_response(content):
+    return Response(
+        content=content,
+        media_type='application/vnd.apple.mpegurl',
+        headers={"Cache-Control": "no-store"},
+    )
+
 @router.get("/{torrent_id}")
-async def get_hls_playlist(torrent_id: str, request: Request):
+async def get_hls_playlist(torrent_id: str, request: Request, segment: int = Query(0, ge=0)):
     """
     This is the main streaming endpoint.
     It triggers the HLS conversion and returns the m3u8 playlist.
@@ -991,7 +1028,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
     # Update access time
     torrent_info["hls_last_accessed"] = datetime.now()
     client_host = request.client.host if request.client else "unknown"
-    logging.info("HLS playlist requested for %s from %s", torrent_id, client_host)
+    logging.info("HLS playlist requested for %s from %s start_segment=%s", torrent_id, client_host, segment)
 
     # Find the main video file
     video_file, video_file_index = _get_video_file_and_index(torrent_info)
@@ -1019,7 +1056,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
 
     playlist_path = os.path.join(HLS_PATH, torrent_id, "stream.m3u8")
     async with _get_torrent_lock(torrent_info):
-        if _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment=0):
+        if _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment=segment):
             logging.info(
                 "Reusing HLS state for %s: playlist=%s process=%s output_dir=%s",
                 torrent_id,
@@ -1029,7 +1066,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
             )
         else:
             logging.info(f"HLS process not running for {torrent_id}. Starting now.")
-            playlist_path = await _start_hls_process(torrent_id, torrent_info, start_segment=0)
+            playlist_path = await _start_hls_process(torrent_id, torrent_info, start_segment=segment)
 
     # Wait for the playlist file to be created
     await _wait_for_hls_artifact(
@@ -1039,7 +1076,7 @@ async def get_hls_playlist(torrent_id: str, request: Request):
         artifact_name="playlist",
     )
 
-    return FileResponse(playlist_path, media_type='application/vnd.apple.mpegurl')
+    return _hls_playlist_response(await _read_hls_playlist_snapshot(playlist_path))
 
 
 @router.post("/{torrent_id}/seek")
