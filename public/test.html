@@ -331,6 +331,9 @@
         let activeTorrentName = null;
         let activeMediaDurationSeconds = null;
         let streamOffsetSeconds = 0;
+        let mediaTimelineBaseSeconds = 0;
+        let pendingMediaTimelineBaseSync = false;
+        let mediaTimelineBaseSyncStartedAt = 0;
         let seekInFlight = false;
         let suppressSeekUntil = 0;
         let lastBackendSeekSegment = null;
@@ -361,7 +364,7 @@
                 return;
             }
 
-            const currentSegment = Math.max(0, Math.floor((streamOffsetSeconds + videoPlayer.currentTime) / 10));
+            const currentSegment = Math.max(0, Math.floor(getAbsolutePlaybackSeconds() / 10));
             if (currentSegment !== lastBackendSeekSegment) {
                 lastBackendSeekSegment = null;
                 lastBackendSeekAt = 0;
@@ -385,15 +388,46 @@
             return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
         }
 
+        function getMediaCurrentTime() {
+            const videoPlayer = document.getElementById('videoPlayer');
+            return Number.isFinite(videoPlayer.currentTime) ? videoPlayer.currentTime : 0;
+        }
+
+        function getLocalPlaybackSeconds() {
+            return Math.max(0, getMediaCurrentTime() - mediaTimelineBaseSeconds);
+        }
+
+        function getAbsolutePlaybackSeconds() {
+            return Math.max(0, streamOffsetSeconds + getLocalPlaybackSeconds());
+        }
+
+        function resetMediaTimelineBase() {
+            mediaTimelineBaseSeconds = getMediaCurrentTime();
+            pendingMediaTimelineBaseSync = false;
+            updatePlaybackTime();
+        }
+
+        function requestMediaTimelineBaseSync() {
+            mediaTimelineBaseSeconds = getMediaCurrentTime();
+            pendingMediaTimelineBaseSync = true;
+            mediaTimelineBaseSyncStartedAt = performance.now();
+            updatePlaybackTime();
+        }
+
+        function syncPendingMediaTimelineBase(force = false) {
+            const waitedLongEnough = performance.now() - mediaTimelineBaseSyncStartedAt > 1500;
+            if (pendingMediaTimelineBaseSync && (force || getMediaCurrentTime() > 0 || waitedLongEnough)) {
+                resetMediaTimelineBase();
+            }
+        }
+
         function updatePlaybackTime() {
             const playbackTime = document.getElementById('playbackTime');
-            const videoPlayer = document.getElementById('videoPlayer');
             if (!playbackTime) {
                 return;
             }
 
-            const localTime = Number.isFinite(videoPlayer.currentTime) ? videoPlayer.currentTime : 0;
-            const absoluteTime = Math.max(0, streamOffsetSeconds + localTime);
+            const absoluteTime = getAbsolutePlaybackSeconds();
             const shownTime = Number.isFinite(activeMediaDurationSeconds)
                 ? Math.min(absoluteTime, activeMediaDurationSeconds)
                 : absoluteTime;
@@ -555,7 +589,7 @@
                 return;
             }
 
-            const targetAbsoluteTime = streamOffsetSeconds + videoPlayer.currentTime;
+            const targetAbsoluteTime = getAbsolutePlaybackSeconds();
             const segment = Math.max(0, Math.floor(targetAbsoluteTime / 10));
             if (segment === lastBackendSeekSegment) {
                 return;
@@ -601,7 +635,7 @@
                         activeHls.off(Hls.Events.MANIFEST_PARSED, onManifestParsed);
                         streamOffsetSeconds = nextStreamOffsetSeconds;
                         videoPlayer.currentTime = 0;
-                        updatePlaybackTime();
+                        requestMediaTimelineBaseSync();
                         nowPlaying.textContent = `Now playing: ${activeTorrentName || activeTorrentId}`;
                         activeHls.startLoad(0);
                         releaseSeekGuard();
@@ -614,9 +648,10 @@
                     videoPlayer.src = nextStreamUrl;
                     videoPlayer.onloadedmetadata = async function() {
                         videoPlayer.currentTime = 0;
-                        updatePlaybackTime();
+                        requestMediaTimelineBaseSync();
                         nowPlaying.textContent = `Now playing: ${activeTorrentName || activeTorrentId}`;
                         await videoPlayer.play();
+                        syncPendingMediaTimelineBase(true);
                         releaseSeekGuard();
                     };
                 }
@@ -644,6 +679,9 @@
             activeTorrentName = torrentName;
             activeMediaDurationSeconds = null;
             streamOffsetSeconds = 0;
+            mediaTimelineBaseSeconds = 0;
+            pendingMediaTimelineBaseSync = false;
+            mediaTimelineBaseSyncStartedAt = 0;
             seekInFlight = false;
             suppressSeekUntil = Date.now() + 1000;
             lastBackendSeekSegment = null;
@@ -660,6 +698,7 @@
                 hls.loadSource(streamUrl);
                 hls.attachMedia(videoPlayer);
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    requestMediaTimelineBaseSync();
                     videoPlayer.play();
                     nowPlaying.textContent = `Now playing: ${torrentName}`;
                     if (!Number.isFinite(activeMediaDurationSeconds)) {
@@ -676,6 +715,7 @@
             } else if (videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {
                 videoPlayer.src = streamUrl;
                 videoPlayer.onloadedmetadata = function() {
+                    requestMediaTimelineBaseSync();
                     videoPlayer.play();
                     nowPlaying.textContent = `Now playing: ${torrentName}`;
                     if (!Number.isFinite(activeMediaDurationSeconds)) {
@@ -747,7 +787,12 @@
                 // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             const videoPlayer = document.getElementById('videoPlayer');
+            videoPlayer.addEventListener('loadedmetadata', () => syncPendingMediaTimelineBase());
+            videoPlayer.addEventListener('loadeddata', () => syncPendingMediaTimelineBase());
+            videoPlayer.addEventListener('canplay', () => syncPendingMediaTimelineBase());
+            videoPlayer.addEventListener('playing', () => syncPendingMediaTimelineBase(true));
             videoPlayer.addEventListener('seeking', notifySeek);
+            videoPlayer.addEventListener('timeupdate', () => syncPendingMediaTimelineBase());
             videoPlayer.addEventListener('timeupdate', resetBackendSeekSegmentAfterPlaybackMoves);
             videoPlayer.addEventListener('timeupdate', updatePlaybackTime);
             videoPlayer.addEventListener('durationchange', updatePlaybackTime);

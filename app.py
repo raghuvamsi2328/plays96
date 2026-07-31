@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api import streaming, torrents
+from src.api import public, streaming, torrents
 from src.background import alert_listener, cleanup_inactive_streams, log_download_speeds
 from src.config import DOWNLOAD_PATH, HLS_PATH, PORT
 from src.state import get_session
@@ -109,6 +109,8 @@ async def health_check():
 
 
 # --- API Routers ---
+app.include_router(public.router, prefix="/api/v1", tags=["public-api"])
+app.include_router(public.compat_router, tags=["compatibility"])
 app.include_router(torrents.router, prefix="/api/torrents", tags=["torrents"])
 app.include_router(streaming.router, prefix="/api/stream", tags=["streaming"])
 
@@ -128,6 +130,7 @@ async def root():
         return {"message": "Torrent Streamer API", "docs": "/docs"}
     
     return FileResponse(html_file)
+
 
 # Mount static files directory
 public_dir = Path("public")

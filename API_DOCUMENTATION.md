@@ -7,6 +7,146 @@ This is a comprehensive FastAPI-based API for torrent streaming with automatic v
 
 ---
 
+## Public API v1
+
+Use these endpoints for external frontends, GitHub Pages, mobile clients, and default media players. The older `/api/torrents` and `/api/stream` routes still work for the built-in test page.
+
+If your frontend is hosted on GitHub Pages over HTTPS, expose this backend over HTTPS too. Browsers block HTTPS pages from calling HTTP APIs even when CORS is enabled.
+
+### HTTPS With Nginx Proxy Manager
+
+Create a DNS record such as `stream.example.com` pointing to your server, then add a Proxy Host in Nginx Proxy Manager:
+
+```text
+Domain Names: stream.example.com
+Scheme: http
+Forward Hostname / IP: your backend host, Docker service name, or server LAN IP
+Forward Port: 6991
+Cache Assets: off
+Block Common Exploits: on
+Websockets Support: off
+```
+
+On the SSL tab, request a Let's Encrypt certificate and enable Force SSL. HTTP/2 is fine to enable. Turn on HSTS only after you confirm the domain works over HTTPS.
+
+The public API builds absolute stream URLs from `X-Forwarded-Proto` and `X-Forwarded-Host`, which Nginx Proxy Manager normally sends. If you use a custom Nginx config, keep these headers:
+
+```nginx
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Forwarded-Proto $scheme;
+```
+
+### API Index
+```http
+GET /api/v1
+```
+
+Returns endpoint URLs for the server.
+
+### Add Torrent
+```http
+POST /api/v1/torrents
+Content-Type: application/json
+```
+
+Request body may use any one of these field names:
+
+```json
+{
+  "magnet": "magnet:?xt=urn:btih:..."
+}
+```
+
+Also accepted: `magnet_link` or `link`.
+
+Response:
+
+```json
+{
+  "id": "infohash",
+  "info_hash": "infohash",
+  "infoHash": "infohash",
+  "name": "Torrent name",
+  "status": "downloading",
+  "progress": 12.3,
+  "stream_url": "https://server.example.com/api/v1/torrents/infohash/stream.m3u8",
+  "playlist_url": "https://server.example.com/api/v1/torrents/infohash/playlist.m3u",
+  "files": [
+    {
+      "index": 0,
+      "name": "video.mkv",
+      "size": 123456789,
+      "length": 123456789,
+      "is_video": true,
+      "is_default_stream": true,
+      "stream_url": "https://server.example.com/api/v1/torrents/infohash/stream.m3u8"
+    }
+  ]
+}
+```
+
+### List Torrents
+```http
+GET /api/v1/torrents
+```
+
+### Torrent Details
+```http
+GET /api/v1/torrents/{torrent_id}
+```
+
+### HLS Stream URL
+```http
+GET /api/v1/torrents/{torrent_id}/stream.m3u8
+```
+
+This redirects to the backend HLS stream and can be used with HLS.js, Safari, VLC, MPV, and other HLS-capable players.
+
+### External Player Playlist
+```http
+GET /api/v1/torrents/{torrent_id}/playlist.m3u
+```
+
+Returns an M3U playlist containing the HLS stream URL. This is the easiest URL to open in a default media player.
+
+### Remove Torrent
+```http
+DELETE /api/v1/torrents/{torrent_id}
+```
+
+### GitHub Pages Example
+
+```js
+const serverUrl = 'https://stream.example.com';
+
+async function addAndOpen(magnet) {
+  const response = await fetch(`${serverUrl}/api/v1/torrents`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ magnet })
+  });
+
+  const torrent = await response.json();
+  window.open(torrent.playlist_url, '_blank');
+}
+```
+
+### Compatibility Aliases
+
+For simple migration from Peerflix-style clients:
+
+```http
+POST /torrents              { "link": "magnet:?xt=urn:btih:..." }
+GET  /torrents
+GET  /torrents/{torrent_id}
+GET  /torrents/{torrent_id}/files
+```
+
+`POST /torrents` returns an array with one torrent object so existing code that reads `responseData[0].infoHash` can keep working.
+
+---
+
 ## API Endpoints
 
 ### Torrent Management
