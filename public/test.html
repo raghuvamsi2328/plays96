@@ -336,6 +336,7 @@
         let lastBackendSeekSegment = null;
         let lastBackendSeekAt = 0;
         const HLS_CONFIG = {
+            startPosition: 0,
             manifestLoadingTimeOut: 180000,
             manifestLoadingMaxRetry: 3,
             manifestLoadingRetryDelay: 2000,
@@ -601,7 +602,7 @@
                         videoPlayer.currentTime = 0;
                         updatePlaybackTime();
                         nowPlaying.textContent = `Now playing: ${activeTorrentName || activeTorrentId}`;
-                        activeHls.startLoad();
+                        activeHls.startLoad(0);
                         releaseSeekGuard();
                     };
 
