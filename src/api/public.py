@@ -78,7 +78,7 @@ def _public_torrent(status, request: Request):
         _public_file(file_info, index, default_video, links)
         for index, file_info in enumerate(status.get("files", []))
     ]
-    default_index = default_video.get("index") if default_video else 0
+    default_index = default_video.get("index") if default_video and default_video.get("index") is not None else 0
 
     return {
         "id": torrent_id,

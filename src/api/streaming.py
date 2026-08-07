@@ -392,6 +392,10 @@ def _can_reuse_hls_playlist(torrent_info, playlist_path, start_segment):
 
     process = torrent_info.get("hls_process")
     if process and process.returncode is None:
+        # If this process was started in realtime mode while downloading, restart
+        # after completion so playback can continue in fast VOD mode.
+        if torrent_info.get("hls_realtime_input") and _is_torrent_complete(torrent_info):
+            return False
         return True
 
     if not _playlist_exists(playlist_path):
@@ -936,6 +940,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment, file_index
     torrent_info["hls_process"] = process
     torrent_info["hls_start_segment"] = start_segment
     torrent_info["hls_command_version"] = HLS_COMMAND_VERSION
+    torrent_info["hls_realtime_input"] = realtime_input
     torrent_info["hls_process_paused"] = False
     logging.info(
         "FFmpeg started for %s: pid=%s playlist=%s output_dir=%s",

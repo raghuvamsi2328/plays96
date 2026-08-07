@@ -23,7 +23,7 @@ def get_torrent_status(torrent_info):
     
     files = []
     if info and info.num_files() > 0:
-        files = [to_dict(info.file_at(i)) for i in range(info.num_files())]
+        files = [to_dict(info.file_at(i), i) for i in range(info.num_files())]
     # If info isn't ready, files will be an empty list, which is the correct state.
 
     status_str = torrent_info.get("status", str(s.state))
@@ -42,7 +42,7 @@ def get_torrent_status(torrent_info):
         "files": files,
     }
 
-def to_dict(file_entry):
+def to_dict(file_entry, index=None):
     """
     Converts a libtorrent file_entry to a dictionary that matches our Pydantic model.
     """
@@ -50,6 +50,7 @@ def to_dict(file_entry):
     is_video = any(file_entry.path.lower().endswith(ext) for ext in video_extensions)
     
     return {
+        'index': index,
         'name': file_entry.path,
         'size': file_entry.size,
         'progress': 0.0,  # Default progress to 0, it will be updated later

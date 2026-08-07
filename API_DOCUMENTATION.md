@@ -3,7 +3,9 @@
 ## Overview
 This is a comprehensive FastAPI-based API for torrent streaming with automatic video selection, FFmpeg HLS conversion, and real-time monitoring. The API accepts torrent hashes and handles magnet URI construction internally.
 
-**Base URL:** `http://localhost:6991` (or your deployed server URL)
+**Base URL:** `https://localhost:6991` (or your deployed server URL)
+
+This document is intended for direct use from another page, static site, or embedded frontend. The public API returns absolute URLs when the request comes through an HTTPS proxy that forwards `X-Forwarded-Proto` and `X-Forwarded-Host`.
 
 ---
 
@@ -72,6 +74,7 @@ Response:
   "progress": 12.3,
   "stream_url": "https://play.server96.com/api/v1/torrents/infohash/stream.m3u8",
   "playlist_url": "https://play.server96.com/api/v1/torrents/infohash/playlist.m3u",
+  "download_url": "https://play.server96.com/api/stream/infohash/download/0",
   "files": [
     {
       "index": 0,
@@ -80,7 +83,10 @@ Response:
       "length": 123456789,
       "is_video": true,
       "is_default_stream": true,
-      "stream_url": "https://play.server96.com/api/v1/torrents/infohash/stream.m3u8"
+      "stream_mode": "hls",
+      "stream_url": "https://play.server96.com/api/stream/infohash?file_index=0",
+      "playlist_url": "https://play.server96.com/api/v1/torrents/infohash/playlist.m3u?file_index=0",
+      "download_url": "https://play.server96.com/api/stream/infohash/download/0"
     }
   ]
 }
@@ -108,7 +114,21 @@ This redirects to the backend HLS stream and can be used with HLS.js, Safari, VL
 GET /api/stream/{torrent_id}?file_index={file_index}
 ```
 
-This streams a specific file from the torrent. Video files use HLS when available; non-video files are served inline.
+This streams a specific file from the torrent. Video files use HLS when available; non-video files are served inline. If you are integrating from another page, use the `stream_url` returned in the file object.
+
+### Per-File Playlist URL
+```http
+GET /api/v1/torrents/{torrent_id}/playlist.m3u?file_index={file_index}
+```
+
+This returns a playlist that targets one file index. Use it when you want a media player to open a specific file directly.
+
+### Per-File Download URL
+```http
+GET /api/stream/{torrent_id}/download/{file_index}
+```
+
+This returns the selected file as an attachment. Use it for a download button in another page.
 
 ### External Player Playlist
 ```http
@@ -142,12 +162,88 @@ async function addAndOpen(magnet) {
   });
 
   const torrent = await response.json();
-  window.open(torrent.playlist_url, '_blank');
+  const defaultFile = torrent.default_file || torrent.files.find((file) => file.is_default_stream) || torrent.files[0];
+  window.open(defaultFile?.playlist_url || torrent.playlist_url, '_blank');
 }
 
 async function downloadFile(torrentId, fileIndex) {
   window.open(`${serverUrl}/api/stream/${torrentId}/download/${fileIndex}`, '_blank');
 }
+
+async function renderTorrentFiles(torrent) {
+  const list = document.getElementById('file-list');
+  list.innerHTML = '';
+
+  torrent.files.forEach((file) => {
+    const item = document.createElement('li');
+    item.textContent = `${file.name} (${file.is_video ? 'video' : 'file'})`;
+
+    const streamButton = document.createElement('button');
+    streamButton.textContent = 'Stream';
+    streamButton.onclick = () => window.open(file.stream_url, '_blank');
+
+    const downloadButton = document.createElement('button');
+    downloadButton.textContent = 'Download';
+    downloadButton.onclick = () => window.open(file.download_url, '_blank');
+
+    item.appendChild(streamButton);
+    item.appendChild(downloadButton);
+    list.appendChild(item);
+  });
+}
+```
+
+### Other Page Integration Example
+
+Use this pattern when the UI lives on a different page from the backend:
+
+```html
+<input id="magnet" placeholder="magnet:?xt=urn:btih:..." />
+<button id="add">Add Torrent</button>
+<div id="status"></div>
+<ul id="file-list"></ul>
+
+<script>
+  const apiBase = 'https://play.server96.com';
+
+  async function addTorrent() {
+    const magnet = document.getElementById('magnet').value.trim();
+    const status = document.getElementById('status');
+
+    const response = await fetch(`${apiBase}/api/v1/torrents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ magnet })
+    });
+
+    const torrent = await response.json();
+    if (!response.ok) {
+      status.textContent = torrent.detail || 'Unable to add torrent';
+      return;
+    }
+
+    status.textContent = torrent.name;
+
+    const list = document.getElementById('file-list');
+    list.innerHTML = '';
+    torrent.files.forEach((file) => {
+      const li = document.createElement('li');
+      li.innerHTML = `
+        <strong>${file.name}</strong>
+        <a href="${file.stream_url}" target="_blank" rel="noreferrer">Stream</a>
+        <a href="${file.download_url}" target="_blank" rel="noreferrer">Download</a>
+      `;
+      list.appendChild(li);
+    });
+
+    const defaultFile = torrent.default_file || torrent.files.find((file) => file.is_default_stream) || torrent.files[0];
+    if (defaultFile && defaultFile.playlist_url) {
+      window.open(defaultFile.playlist_url, '_blank');
+    }
+  }
+
+  document.getElementById('add').addEventListener('click', addTorrent);
+</script>
 ```
 
 ### Compatibility Aliases
@@ -356,14 +452,14 @@ if __name__ == "__main__":
 
 ```html
 <video id="player" controls>
-    <source src="/api/stream/{torrent_id}" type="application/x-mpegURL">
+  <source src="/api/stream/{torrent_id}?file_index={file_index}" type="application/x-mpegURL">
     Your browser does not support HLS video.
 </video>
 
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
     const video = document.getElementById('player');
-    const videoSrc = '/api/stream/{torrent_id}';
+  const videoSrc = '/api/stream/{torrent_id}?file_index={file_index}';
     
     if (Hls.isSupported()) {
         const hls = new Hls();
