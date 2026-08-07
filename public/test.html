@@ -432,6 +432,24 @@
       border-color: var(--primary);
     }
 
+    .toolbar {
+      display: flex;
+      gap: 0.65rem;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .btn-danger {
+      background: #fff;
+      color: var(--primary);
+      border: 1px solid rgba(248, 88, 24, 0.28);
+    }
+
+    .btn-danger:hover {
+      background: var(--coral-bg);
+    }
+
     .result {
       overflow: hidden;
     }
@@ -871,9 +889,12 @@
 
       <section class="section rail" id="demo">
         <div class="drop-zone">
-          <div class="drop-headline">
-            <strong>Paste a torrent magnet link</strong>
-            <span>The page submits to the public API, then renders the returned torrent file tree and stream links.</span>
+          <div class="toolbar">
+            <div class="drop-headline">
+              <strong>Paste a torrent magnet link</strong>
+              <span>The page submits to the public API, then renders the returned torrent file tree and stream links.</span>
+            </div>
+            <button class="btn-action btn-danger" id="clear-btn" type="button">Clear All Data</button>
           </div>
 
           <div class="drop-input-group">
@@ -1058,6 +1079,7 @@
   <script>
     const apiBase = window.location.origin;
     const fetchBtn = document.getElementById('fetch-btn');
+    const clearBtn = document.getElementById('clear-btn');
     const magnetInput = document.getElementById('magnet-input');
     const resultBox = document.getElementById('result-box');
     const fileTree = document.getElementById('file-tree');
@@ -1263,6 +1285,53 @@
       }
     }
 
+    async function clearAllData() {
+      const confirmed = window.confirm('Remove all torrents, downloaded files, and HLS artifacts?');
+      if (!confirmed) {
+        return;
+      }
+
+      clearBtn.disabled = true;
+      clearBtn.textContent = 'Clearing...';
+
+      try {
+        const response = await fetch(`${apiBase}/api/v1/torrents`, {
+          method: 'DELETE'
+        });
+        const payload = await response.json();
+
+        if (!response.ok) {
+          throw new Error(payload?.detail || 'Unable to clear torrent data');
+        }
+
+        magnetInput.value = '';
+        fileTree.innerHTML = '';
+        mediaViewport.innerHTML = '';
+        previewBox.style.display = 'none';
+        resultBox.style.display = 'block';
+        document.getElementById('result-name').textContent = 'All torrent data cleared';
+        document.getElementById('result-stats').textContent = `${payload.removed_count || 0} torrent(s) removed`;
+
+        const row = document.createElement('li');
+        row.className = 'file-node';
+        row.textContent = payload.message || 'All torrent data cleared successfully.';
+        fileTree.appendChild(row);
+      } catch (error) {
+        resultBox.style.display = 'block';
+        document.getElementById('result-name').textContent = 'Clear failed';
+        document.getElementById('result-stats').textContent = error.message;
+        fileTree.innerHTML = '';
+
+        const row = document.createElement('li');
+        row.className = 'file-node';
+        row.textContent = 'The backend could not clear the torrent state.';
+        fileTree.appendChild(row);
+      } finally {
+        clearBtn.disabled = false;
+        clearBtn.textContent = 'Clear All Data';
+      }
+    }
+
     fetchBtn.addEventListener('click', () => {
       const value = magnetInput.value.trim();
       if (!value) {
@@ -1272,6 +1341,8 @@
 
       submitMagnet(value);
     });
+
+    clearBtn.addEventListener('click', clearAllData);
 
     document.getElementById('sample-video').addEventListener('click', () => {
       magnetInput.value = 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel';

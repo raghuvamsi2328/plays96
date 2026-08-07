@@ -38,6 +38,34 @@ class TorrentStatus(BaseModel):
     files: List[FileStatus]
 
 
+async def _remove_torrent_data(torrent_id: str):
+    torrent_info = active_torrents.get(torrent_id)
+    if not torrent_info:
+        raise HTTPException(status_code=404, detail="Torrent not found")
+
+    handle = torrent_info["handle"]
+    ses = get_session()
+
+    logger.info(f"Removing torrent: {torrent_id}")
+
+    try:
+        ses.remove_torrent(handle, lt.session.delete_files)
+    except Exception as e:
+        logger.error(f"Error removing torrent from session: {e}")
+
+    del active_torrents[torrent_id]
+
+    hls_output_dir = Path(HLS_PATH) / torrent_id
+    if hls_output_dir.exists():
+        try:
+            shutil.rmtree(hls_output_dir)
+            logger.info(f"Cleaned up HLS directory: {hls_output_dir}")
+        except Exception as e:
+            logger.error(f"Error cleaning up HLS directory: {e}")
+
+    return torrent_id
+
+
 @router.post("", status_code=202, include_in_schema=False)
 @router.post("/", status_code=202)
 async def add_torrent(request: TorrentAddRequest):
@@ -108,33 +136,51 @@ async def get_single_torrent(torrent_id: str):
     return get_torrent_status(torrent_info)
 
 
+@router.delete("", status_code=200, include_in_schema=False)
+@router.delete("/", status_code=200)
+async def remove_all_torrents():
+    """Removes all torrents and their downloaded files."""
+    torrent_ids = list(active_torrents.keys())
+    removed = []
+
+    for torrent_id in torrent_ids:
+        try:
+            removed.append(await _remove_torrent_data(torrent_id))
+        except HTTPException:
+            continue
+
+    downloads_path = Path(DOWNLOAD_PATH)
+    if downloads_path.exists():
+        for child in downloads_path.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except FileNotFoundError:
+                continue
+
+    hls_path = Path(HLS_PATH)
+    if hls_path.exists():
+        for child in hls_path.iterdir():
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            except FileNotFoundError:
+                continue
+
+    return {
+        "message": "All torrent data cleared successfully",
+        "removed_torrents": removed,
+        "removed_count": len(removed),
+    }
+
+
 @router.delete("/{torrent_id}", status_code=200)
 async def remove_torrent(torrent_id: str):
     """Removes a torrent and its downloaded files."""
     torrent_id = torrent_id.lower()
-    torrent_info = active_torrents.get(torrent_id)
-    if not torrent_info:
-        raise HTTPException(status_code=404, detail="Torrent not found")
-
-    handle = torrent_info["handle"]
-    ses = get_session()
-    
-    logger.info(f"Removing torrent: {torrent_id}")
-    
-    try:
-        ses.remove_torrent(handle, lt.session.delete_files)
-    except Exception as e:
-        logger.error(f"Error removing torrent from session: {e}")
-    
-    del active_torrents[torrent_id]
-
-    # Clean up HLS files if they exist
-    hls_output_dir = Path(HLS_PATH) / torrent_id
-    if hls_output_dir.exists():
-        try:
-            shutil.rmtree(hls_output_dir)
-            logger.info(f"Cleaned up HLS directory: {hls_output_dir}")
-        except Exception as e:
-            logger.error(f"Error cleaning up HLS directory: {e}")
-        
+    await _remove_torrent_data(torrent_id)
     return {"message": "Torrent removed successfully"}

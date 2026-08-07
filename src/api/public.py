@@ -158,6 +158,7 @@ async def get_api_index(request: Request):
         "endpoints": {
             "add_torrent": f"{base_url}/api/v1/torrents",
             "list_torrents": f"{base_url}/api/v1/torrents",
+            "clear_torrents": f"{base_url}/api/v1/torrents",
             "torrent_details": f"{base_url}/api/v1/torrents/{{torrent_id}}",
             "hls_stream": f"{base_url}/api/v1/torrents/{{torrent_id}}/stream.m3u8",
             "external_player_playlist": f"{base_url}/api/v1/torrents/{{torrent_id}}/playlist.m3u",
@@ -178,6 +179,11 @@ async def list_public_torrents(request: Request):
         _public_torrent(get_torrent_status(torrent_info), request)
         for torrent_info in active_torrents.values()
     ]
+
+
+@router.delete("/torrents")
+async def delete_all_public_torrents():
+    return await torrents.remove_all_torrents()
 
 
 @router.get("/torrents/{torrent_id}")

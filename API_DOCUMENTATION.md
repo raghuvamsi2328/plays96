@@ -97,6 +97,13 @@ Response:
 GET /api/v1/torrents
 ```
 
+### Clear All Torrent Data
+```http
+DELETE /api/v1/torrents
+```
+
+Removes all active torrents, downloaded files, and generated HLS artifacts.
+
 ### Torrent Details
 ```http
 GET /api/v1/torrents/{torrent_id}
