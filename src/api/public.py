@@ -191,7 +191,7 @@ async def delete_public_torrent(torrent_id: str):
 
 
 @router.get("/torrents/{torrent_id}/stream.m3u8")
-async def get_public_stream(torrent_id: str, request: Request, segment: int = Query(0, ge=0), file_index: int | None = Query(None, ge=0)):
+async def get_public_stream(torrent_id: str, request: Request, segment: int = Query(0, ge=0), file_index: Optional[int] = Query(None, ge=0)):
     torrent = _status_for_torrent(torrent_id, request)
     default_index = torrent.get("default_file", {}).get("index", 0)
     resolved_index = default_index if file_index is None else file_index
@@ -200,7 +200,7 @@ async def get_public_stream(torrent_id: str, request: Request, segment: int = Qu
 
 
 @router.get("/torrents/{torrent_id}/playlist.m3u")
-async def get_public_playlist(torrent_id: str, request: Request, file_index: int | None = Query(None, ge=0)):
+async def get_public_playlist(torrent_id: str, request: Request, file_index: Optional[int] = Query(None, ge=0)):
     torrent = _status_for_torrent(torrent_id, request)
     title = torrent.get("name") or torrent_id
     default_index = torrent.get("default_file", {}).get("index", 0)

@@ -7,6 +7,7 @@ import os
 import signal
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import libtorrent as lt
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -1049,7 +1050,7 @@ async def get_hls_playlist(
     torrent_id: str,
     request: Request,
     segment: int = Query(0, ge=0),
-    file_index: int | None = Query(None, ge=0),
+    file_index: Optional[int] = Query(None, ge=0),
 ):
     """
     This is the main streaming endpoint.
