@@ -15,10 +15,10 @@ If your frontend is hosted on GitHub Pages over HTTPS, expose this backend over 
 
 ### HTTPS With Nginx Proxy Manager
 
-Create a DNS record such as `stream.example.com` pointing to your server, then add a Proxy Host in Nginx Proxy Manager:
+Create a DNS record such as `play.server96.com` pointing to your server, then add a Proxy Host in Nginx Proxy Manager:
 
 ```text
-Domain Names: stream.example.com
+Domain Names: play.server96.com
 Scheme: http
 Forward Hostname / IP: your backend host, Docker service name, or server LAN IP
 Forward Port: 6991
@@ -70,8 +70,8 @@ Response:
   "name": "Torrent name",
   "status": "downloading",
   "progress": 12.3,
-  "stream_url": "https://server.example.com/api/v1/torrents/infohash/stream.m3u8",
-  "playlist_url": "https://server.example.com/api/v1/torrents/infohash/playlist.m3u",
+  "stream_url": "https://play.server96.com/api/v1/torrents/infohash/stream.m3u8",
+  "playlist_url": "https://play.server96.com/api/v1/torrents/infohash/playlist.m3u",
   "files": [
     {
       "index": 0,
@@ -80,7 +80,7 @@ Response:
       "length": 123456789,
       "is_video": true,
       "is_default_stream": true,
-      "stream_url": "https://server.example.com/api/v1/torrents/infohash/stream.m3u8"
+      "stream_url": "https://play.server96.com/api/v1/torrents/infohash/stream.m3u8"
     }
   ]
 }
@@ -103,6 +103,13 @@ GET /api/v1/torrents/{torrent_id}/stream.m3u8
 
 This redirects to the backend HLS stream and can be used with HLS.js, Safari, VLC, MPV, and other HLS-capable players.
 
+### Per-File Stream URL
+```http
+GET /api/stream/{torrent_id}?file_index={file_index}
+```
+
+This streams a specific file from the torrent. Video files use HLS when available; non-video files are served inline.
+
 ### External Player Playlist
 ```http
 GET /api/v1/torrents/{torrent_id}/playlist.m3u
@@ -115,10 +122,17 @@ Returns an M3U playlist containing the HLS stream URL. This is the easiest URL t
 DELETE /api/v1/torrents/{torrent_id}
 ```
 
+### Download File
+```http
+GET /api/stream/{torrent_id}/download/{file_index}
+```
+
+Returns the selected file as an attachment.
+
 ### GitHub Pages Example
 
 ```js
-const serverUrl = 'https://stream.example.com';
+const serverUrl = 'https://play.server96.com';
 
 async function addAndOpen(magnet) {
   const response = await fetch(`${serverUrl}/api/v1/torrents`, {
@@ -129,6 +143,10 @@ async function addAndOpen(magnet) {
 
   const torrent = await response.json();
   window.open(torrent.playlist_url, '_blank');
+}
+
+async function downloadFile(torrentId, fileIndex) {
+  window.open(`${serverUrl}/api/stream/${torrentId}/download/${fileIndex}`, '_blank');
 }
 ```
 

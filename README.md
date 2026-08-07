@@ -5,6 +5,7 @@ A Python-based server for streaming torrent content with automatic video file se
 ## Features
 
 - **Auto Video Selection**: Automatically selects the best video file (MP4 > MKV > AVI priority)
+- **Per-File Playback**: Streams or downloads any file in the torrent by file index
 - **FFmpeg Remuxing**: Converts video files to HLS format for browser compatibility
 - **Auto Cleanup**: Removes inactive streams
 - **Docker Support**: Ready for container deployment
@@ -75,6 +76,8 @@ docker-compose up -d
 ### Streaming
 - `GET /api/stream/{torrent_id}` - Get HLS playlist
 - `GET /api/stream/{torrent_id}/{segment}` - Get HLS segment
+- `GET /api/stream/{torrent_id}/download/{file_index}` - Download any file from the torrent
+- `GET /api/stream/{torrent_id}?file_index={file_index}` - Stream a specific file by index
 
 ## Auto Cleanup Feature
 

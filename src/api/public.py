@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from src.api import torrents
 from src.state import active_torrents
-from src.utils import get_largest_video_file, get_torrent_status
+from src.utils import get_preferred_stream_file, get_torrent_status
 
 router = APIRouter()
 compat_router = APIRouter(include_in_schema=False)
@@ -41,6 +41,8 @@ def _links(base_url, torrent_id):
         "self": f"{base_url}/api/v1/torrents/{torrent_id}",
         "stream": f"{base_url}/api/v1/torrents/{torrent_id}/stream.m3u8",
         "playlist": f"{base_url}/api/v1/torrents/{torrent_id}/playlist.m3u",
+        "file_stream": f"{base_url}/api/stream/{torrent_id}?file_index={{file_index}}",
+        "file_download": f"{base_url}/api/stream/{torrent_id}/download/{{file_index}}",
         "metadata": f"{base_url}/api/stream/{torrent_id}/metadata",
         "legacy_stream": f"{base_url}/api/stream/{torrent_id}",
     }
@@ -48,8 +50,9 @@ def _links(base_url, torrent_id):
 
 def _public_file(file_info, index, default_video, links):
     is_default_stream = bool(default_video and file_info.get("name") == default_video.get("name"))
-    stream_url = links["stream"] if is_default_stream else None
-    playlist_url = links["playlist"] if is_default_stream else None
+    stream_url = links["file_stream"].format(file_index=index)
+    download_url = links["file_download"].format(file_index=index)
+    playlist_url = links["playlist"] + f"?file_index={index}"
     return {
         "index": index,
         "name": file_info.get("name"),
@@ -58,8 +61,10 @@ def _public_file(file_info, index, default_video, links):
         "progress": file_info.get("progress", 0),
         "is_video": file_info.get("is_video", False),
         "is_default_stream": is_default_stream,
+        "stream_mode": "hls" if file_info.get("is_video", False) else "direct",
         "stream_url": stream_url,
         "playlist_url": playlist_url,
+        "download_url": download_url,
         "link": stream_url,
     }
 
@@ -68,11 +73,12 @@ def _public_torrent(status, request: Request):
     torrent_id = status.get("hash")
     base_url = _base_url(request)
     links = _links(base_url, torrent_id)
-    default_video = get_largest_video_file(status.get("files", []))
+    default_video = get_preferred_stream_file(status.get("files", []))
     files = [
         _public_file(file_info, index, default_video, links)
         for index, file_info in enumerate(status.get("files", []))
     ]
+    default_index = default_video.get("index") if default_video else 0
 
     return {
         "id": torrent_id,
@@ -87,8 +93,9 @@ def _public_torrent(status, request: Request):
         "num_peers": status.get("num_peers", 0),
         "files": files,
         "default_file": default_video,
-        "stream_url": links["stream"],
-        "playlist_url": links["playlist"],
+        "stream_url": f"{base_url}/api/stream/{torrent_id}?file_index={default_index}",
+        "playlist_url": f"{base_url}/api/v1/torrents/{torrent_id}/playlist.m3u?file_index={default_index}",
+        "download_url": f"{base_url}/api/stream/{torrent_id}/download/{default_index}",
         "links": links,
     }
 
@@ -154,6 +161,8 @@ async def get_api_index(request: Request):
             "torrent_details": f"{base_url}/api/v1/torrents/{{torrent_id}}",
             "hls_stream": f"{base_url}/api/v1/torrents/{{torrent_id}}/stream.m3u8",
             "external_player_playlist": f"{base_url}/api/v1/torrents/{{torrent_id}}/playlist.m3u",
+            "file_stream": f"{base_url}/api/stream/{{torrent_id}}?file_index={{file_index}}",
+            "file_download": f"{base_url}/api/stream/{{torrent_id}}/download/{{file_index}}",
         },
     }
 
@@ -182,21 +191,39 @@ async def delete_public_torrent(torrent_id: str):
 
 
 @router.get("/torrents/{torrent_id}/stream.m3u8")
-async def get_public_stream(torrent_id: str, request: Request, segment: int = Query(0, ge=0)):
-    torrent_id, _ = _torrent_or_404(torrent_id)
-    stream_url = f"{_base_url(request)}/api/stream/{torrent_id}?segment={segment}"
+async def get_public_stream(torrent_id: str, request: Request, segment: int = Query(0, ge=0), file_index: int | None = Query(None, ge=0)):
+    torrent = _status_for_torrent(torrent_id, request)
+    default_index = torrent.get("default_file", {}).get("index", 0)
+    resolved_index = default_index if file_index is None else file_index
+    stream_url = f"{_base_url(request)}/api/stream/{torrent_id}?segment={segment}&file_index={resolved_index}"
     return RedirectResponse(stream_url, status_code=307)
 
 
 @router.get("/torrents/{torrent_id}/playlist.m3u")
-async def get_public_playlist(torrent_id: str, request: Request):
+async def get_public_playlist(torrent_id: str, request: Request, file_index: int | None = Query(None, ge=0)):
     torrent = _status_for_torrent(torrent_id, request)
     title = torrent.get("name") or torrent_id
+    default_index = torrent.get("default_file", {}).get("index", 0)
+    resolved_index = default_index if file_index is None else file_index
     return _playlist_response(
         "#EXTM3U\n"
         f"#EXTINF:-1,{title}\n"
-        f"{torrent['stream_url']}\n"
+        f"{torrent['files'][resolved_index]['stream_url'] if torrent.get('files') and resolved_index < len(torrent['files']) else torrent['stream_url']}\n"
     )
+
+
+@router.get("/torrents/{torrent_id}/files/{file_index}/stream.m3u8")
+async def get_public_file_stream(torrent_id: str, file_index: int, request: Request, segment: int = Query(0, ge=0)):
+    torrent_id, _ = _torrent_or_404(torrent_id)
+    stream_url = f"{_base_url(request)}/api/stream/{torrent_id}?segment={segment}&file_index={file_index}"
+    return RedirectResponse(stream_url, status_code=307)
+
+
+@router.get("/torrents/{torrent_id}/files/{file_index}/download")
+async def get_public_file_download(torrent_id: str, file_index: int, request: Request):
+    torrent_id, _ = _torrent_or_404(torrent_id)
+    download_url = f"{_base_url(request)}/api/stream/{torrent_id}/download/{file_index}"
+    return RedirectResponse(download_url, status_code=307)
 
 
 @compat_router.post("/torrents", status_code=202)

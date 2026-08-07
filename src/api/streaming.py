@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import signal
 from datetime import datetime
@@ -13,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 
 from src.config import DOWNLOAD_PATH, HLS_PATH
 from src.state import active_torrents
-from src.utils import get_largest_video_file
+from src.utils import get_preferred_stream_file
 
 router = APIRouter()
 
@@ -41,6 +42,7 @@ HLS_MPEGTS_VIDEO_BITSTREAM_FILTERS = {
     "h265": "hevc_mp4toannexb",
 }
 HLS_AUDIO_COPY_CODECS = {"aac"}
+SOURCE_FILE_WAIT_SECONDS = 120
 
 
 def _normalize_codec_name(codec_name):
@@ -112,16 +114,44 @@ def _build_media_info(
     }
 
 
-def _get_video_file_and_index(torrent_info):
-    video_file = get_largest_video_file(torrent_info.get("files", []))
+def _get_video_file_and_index(torrent_info, file_index=None):
+    files = torrent_info.get("files", [])
+    if not files:
+        return None, None
+
+    if file_index is not None:
+        for file_info in files:
+            if file_info.get("index") == file_index:
+                return file_info, file_info.get("index")
+        return None, None
+
+    video_file = get_preferred_stream_file(files)
     if not video_file:
         return None, None
 
-    for file_info in torrent_info.get("files", []):
-        if file_info.get("name") == video_file.get("name"):
+    for file_info in files:
+        if file_info.get("index") == video_file.get("index"):
             return video_file, file_info.get("index")
 
     return video_file, None
+
+
+def _get_source_file_path(file_info):
+    return Path(DOWNLOAD_PATH) / file_info["name"]
+
+
+def _guess_media_type(file_name):
+    return mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+
+
+def _file_response(path, file_name, attachment=False):
+    return FileResponse(
+        str(path),
+        media_type=_guess_media_type(file_name),
+        filename=Path(file_name).name,
+        content_disposition_type="attachment" if attachment else "inline",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _get_torrent_lock(torrent_info):
@@ -785,18 +815,18 @@ async def _pace_ffmpeg_process(torrent_id, torrent_info, process, file_index, hl
         await asyncio.sleep(FFMPEG_PACE_CHECK_SECONDS)
 
 
-async def _start_hls_process(torrent_id, torrent_info, start_segment):
+async def _start_hls_process(torrent_id, torrent_info, start_segment, file_index=None):
     handle = torrent_info["handle"]
     if handle.status().paused:
         handle.resume()
         torrent_info["status"] = "downloading"
 
-    video_file, video_file_index = _get_video_file_and_index(torrent_info)
+    video_file, video_file_index = _get_video_file_and_index(torrent_info, file_index=file_index)
     if not video_file:
-        raise HTTPException(status_code=404, detail="No video file found in torrent.")
+        raise HTTPException(status_code=404, detail="No file found in torrent.")
 
     if video_file_index is None:
-        raise HTTPException(status_code=409, detail="Video file index not ready")
+        raise HTTPException(status_code=409, detail="File index not ready")
 
     priorities = [1] * len(torrent_info["files"])
     priorities[video_file_index] = 7
@@ -821,7 +851,7 @@ async def _start_hls_process(torrent_id, torrent_info, start_segment):
         _describe_directory_entries(hls_output_dir),
     )
 
-    source_file_path = os.path.join(DOWNLOAD_PATH, video_file["name"])
+    source_file_path = str(_get_source_file_path(video_file))
     while not os.path.exists(source_file_path):
         logging.info(f"Waiting for source file to exist: {source_file_path}")
         await asyncio.sleep(1)
@@ -1015,7 +1045,12 @@ def _hls_playlist_response(content):
     )
 
 @router.get("/{torrent_id}")
-async def get_hls_playlist(torrent_id: str, request: Request, segment: int = Query(0, ge=0)):
+async def get_hls_playlist(
+    torrent_id: str,
+    request: Request,
+    segment: int = Query(0, ge=0),
+    file_index: int | None = Query(None, ge=0),
+):
     """
     This is the main streaming endpoint.
     It triggers the HLS conversion and returns the m3u8 playlist.
@@ -1030,14 +1065,12 @@ async def get_hls_playlist(torrent_id: str, request: Request, segment: int = Que
     client_host = request.client.host if request.client else "unknown"
     logging.info("HLS playlist requested for %s from %s start_segment=%s", torrent_id, client_host, segment)
 
-    # Find the main video file
-    video_file, video_file_index = _get_video_file_and_index(torrent_info)
+    # Find the requested file, or fall back to the preferred stream file.
+    video_file, video_file_index = _get_video_file_and_index(torrent_info, file_index=file_index)
     if not video_file:
-        # If files are not populated yet, wait for metadata
         handle = torrent_info["handle"]
         if not handle.has_metadata():
              raise HTTPException(status_code=503, detail="Metadata not ready, please wait.")
-        # Re-fetch files if they were empty before
         ti = handle.get_torrent_info()
         files = []
         for i in range(ti.num_files()):
@@ -1047,12 +1080,22 @@ async def get_hls_playlist(torrent_id: str, request: Request, segment: int = Que
                 "name": file_entry.path,
                 "size": file_entry.size,
                 "progress": 0.0,
-                "is_video": any(file_entry.path.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov'])
+                "is_video": any(file_entry.path.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.mpg', '.mpeg', '.m4v'])
             })
         torrent_info["files"] = files
-        video_file, video_file_index = _get_video_file_and_index(torrent_info)
+        video_file, video_file_index = _get_video_file_and_index(torrent_info, file_index=file_index)
         if not video_file:
-            raise HTTPException(status_code=404, detail="No video file found in torrent.")
+            raise HTTPException(status_code=404, detail="No file found in torrent.")
+
+    source_file_path = _get_source_file_path(video_file)
+    await _wait_for_hls_artifact(
+        source_file_path,
+        SOURCE_FILE_WAIT_SECONDS,
+        artifact_name="source file",
+    )
+
+    if not video_file.get("is_video"):
+        return _file_response(source_file_path, video_file.get("name", "download"), attachment=False)
 
     playlist_path = os.path.join(HLS_PATH, torrent_id, "stream.m3u8")
     async with _get_torrent_lock(torrent_info):
@@ -1066,7 +1109,12 @@ async def get_hls_playlist(torrent_id: str, request: Request, segment: int = Que
             )
         else:
             logging.info(f"HLS process not running for {torrent_id}. Starting now.")
-            playlist_path = await _start_hls_process(torrent_id, torrent_info, start_segment=segment)
+            playlist_path = await _start_hls_process(
+                torrent_id,
+                torrent_info,
+                start_segment=segment,
+                file_index=video_file_index,
+            )
 
     # Wait for the playlist file to be created
     await _wait_for_hls_artifact(
@@ -1077,6 +1125,31 @@ async def get_hls_playlist(torrent_id: str, request: Request, segment: int = Que
     )
 
     return _hls_playlist_response(await _read_hls_playlist_snapshot(playlist_path))
+
+
+@router.get("/{torrent_id}/download/{file_index}")
+async def download_torrent_file(torrent_id: str, file_index: int, request: Request):
+    torrent_id = torrent_id.lower()
+    torrent_info = active_torrents.get(torrent_id)
+    if not torrent_info:
+        raise HTTPException(status_code=404, detail="Torrent not found")
+
+    torrent_info["hls_last_accessed"] = datetime.now()
+    client_host = request.client.host if request.client else "unknown"
+    logging.info("Download requested for %s file_index=%s from %s", torrent_id, file_index, client_host)
+
+    file_info, _ = _get_video_file_and_index(torrent_info, file_index=file_index)
+    if not file_info:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    source_file_path = _get_source_file_path(file_info)
+    await _wait_for_hls_artifact(
+        source_file_path,
+        SOURCE_FILE_WAIT_SECONDS,
+        artifact_name="source file",
+    )
+
+    return _file_response(source_file_path, file_info.get("name", "download"), attachment=True)
 
 
 @router.post("/{torrent_id}/seek")

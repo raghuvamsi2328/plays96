@@ -56,12 +56,22 @@ def to_dict(file_entry):
         'is_video': is_video
     }
 
-def get_largest_video_file(files):
-    """Finds the largest video file in a list of files."""
-    best_file = None
-    max_size = -1
+def get_preferred_stream_file(files):
+    """Finds the preferred stream file in a list of files.
+
+    Prefer the first video file when available, otherwise fall back to the
+    first file in the torrent.
+    """
+    if not files:
+        return None
+
     for file in files:
-        if file.get("is_video") and file.get("size") > max_size:
-            max_size = file["size"]
-            best_file = file
-    return best_file
+        if file.get("is_video"):
+            return file
+
+    return files[0]
+
+
+def get_largest_video_file(files):
+    """Backward-compatible alias for the preferred stream file selection."""
+    return get_preferred_stream_file(files)
