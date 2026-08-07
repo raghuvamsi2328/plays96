@@ -28,8 +28,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application's code
 COPY . .
 
-# Make port 6991 available to the world outside this container
+# Make the HTTP API port and libtorrent listen port available to the world outside this container
 EXPOSE 6991
+EXPOSE 7001
+EXPOSE 7001/udp
 
 # Run app.py when the container launches
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "6991"]

@@ -57,7 +57,7 @@ uvicorn app:app --host 0.0.0.0 --port 6991
 ### Docker
 ```bash
 docker build -t torrent-stream .
-docker run -p 6991:6991 torrent-stream
+docker run -p 6991:6991 -p 7001:7001 -p 7001:7001/udp -e TORRENT_PORT=7001 torrent-stream
 ```
 
 ### Docker Compose
@@ -106,6 +106,7 @@ The server automatically removes inactive streams:
 
 ### Environment Variables
 - `PORT` - Server port (default: 6991)
+- `TORRENT_PORT` - libtorrent peer/listen port (default: `PORT + 10`)
 - `DOWNLOAD_PATH` - Path for torrent downloads
 - `HLS_PATH` - Path for HLS segments
 - `WARM_CACHE_TIMEOUT_MINUTES` - Cleanup timeout
@@ -131,9 +132,10 @@ Features:
 The application is containerized with all dependencies:
 
 1. Port 6991 exposed
-2. FFmpeg included in container
-3. Automatic dependency installation
-4. Graceful shutdown handling
+2. Torrent port 7001 exposed over TCP and UDP
+3. FFmpeg included in container
+4. Automatic dependency installation
+5. Graceful shutdown handling
 
 ## Troubleshooting
 
@@ -141,7 +143,7 @@ The application is containerized with all dependencies:
 1. **FFmpeg not found**: Ensure FFmpeg is installed
 2. **Port conflicts**: Change PORT environment variable
 3. **Memory issues**: Monitor stream cleanup
-4. **Streaming issues**: Check libtorrent configuration
+4. **Streaming issues**: Ensure `TORRENT_PORT` is exposed over TCP and UDP and reachable through Docker/NAT
 
 ### Logs
 - Background task execution logs

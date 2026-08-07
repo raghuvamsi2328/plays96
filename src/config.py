@@ -7,6 +7,7 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 PORT = int(os.getenv("PORT", 6991))
+TORRENT_PORT = int(os.getenv("TORRENT_PORT", PORT + 10))
 CLEANUP_INTERVAL_HOURS = 12
 # Always resolve to absolute paths
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -22,3 +23,4 @@ for k, v in os.environ.items():
 # Log the resolved paths at import time for debugging
 logging.info(f"[CONFIG] DOWNLOAD_PATH: {DOWNLOAD_PATH}")
 logging.info(f"[CONFIG] HLS_PATH: {HLS_PATH}")
+logging.info(f"[CONFIG] TORRENT_PORT: {TORRENT_PORT}")

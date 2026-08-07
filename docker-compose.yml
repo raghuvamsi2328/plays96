@@ -7,6 +7,8 @@ services:
     user: "0:0"  # Run as root to avoid permission issues
     ports:
       - 6991:6991
+      - 7001:7001
+      - 7001:7001/udp
     volumes:
       - ./downloads:/app/downloads
       - ./logs:/app/logs
@@ -14,6 +16,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=6991
+      - TORRENT_PORT=7001
       - DOWNLOAD_PATH=/app/downloads
       - HLS_PATH=/app/hls
     restart: unless-stopped
