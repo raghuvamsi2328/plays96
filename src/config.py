@@ -14,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_PATH = Path(os.getenv("DOWNLOAD_PATH", str(BASE_DIR / "downloads"))).resolve()
 HLS_PATH = Path(os.getenv("HLS_PATH", str(BASE_DIR / "hls"))).resolve()
 WARM_CACHE_TIMEOUT_MINUTES = 20
+INACTIVE_TORRENT_DELETE_MINUTES = int(os.getenv("INACTIVE_TORRENT_DELETE_MINUTES", 90))
 
 # Diagnostic: log all environment variables at startup
 logging.info("[CONFIG] All environment variables at startup:")
@@ -24,3 +25,4 @@ for k, v in os.environ.items():
 logging.info(f"[CONFIG] DOWNLOAD_PATH: {DOWNLOAD_PATH}")
 logging.info(f"[CONFIG] HLS_PATH: {HLS_PATH}")
 logging.info(f"[CONFIG] TORRENT_PORT: {TORRENT_PORT}")
+logging.info(f"[CONFIG] INACTIVE_TORRENT_DELETE_MINUTES: {INACTIVE_TORRENT_DELETE_MINUTES}")

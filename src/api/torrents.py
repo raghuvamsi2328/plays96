@@ -106,6 +106,7 @@ async def add_torrent(request: TorrentAddRequest):
             "handle": handle,
             "status": "metadata",
             "added_time": datetime.now(),
+            "last_activity_at": datetime.now(),
             "files": [],
             "hls_process": None,
             "hls_last_accessed": None,

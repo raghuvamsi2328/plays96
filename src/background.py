@@ -10,8 +10,10 @@ import libtorrent as lt
 from src.config import (
     DOWNLOAD_PATH,
     HLS_PATH,
+    INACTIVE_TORRENT_DELETE_MINUTES,
     WARM_CACHE_TIMEOUT_MINUTES,
 )
+from src.api.torrents import _remove_torrent_data
 from src.state import active_torrents, get_session
 
 
@@ -72,6 +74,20 @@ async def cleanup_inactive_streams():
         
         for torrent_id, torrent_info in list(active_torrents.items()):
             last_accessed = torrent_info.get("hls_last_accessed")
+            last_activity_at = torrent_info.get("last_activity_at") or torrent_info.get("added_time")
+
+            if last_activity_at and (now - last_activity_at) > timedelta(minutes=INACTIVE_TORRENT_DELETE_MINUTES):
+                logging.info(
+                    "Torrent %s inactive for over %s minutes. Removing torrent data.",
+                    torrent_id,
+                    INACTIVE_TORRENT_DELETE_MINUTES,
+                )
+                try:
+                    await _remove_torrent_data(torrent_id)
+                except Exception as exc:
+                    logging.error("Failed to auto-remove inactive torrent %s: %s", torrent_id, exc)
+                continue
+
             if last_accessed and (now - last_accessed) > timedelta(minutes=WARM_CACHE_TIMEOUT_MINUTES):
                 logging.info(f"HLS stream for {torrent_id} is inactive. Cleaning up.")
                 

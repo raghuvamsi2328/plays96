@@ -1067,7 +1067,9 @@ async def get_hls_playlist(
         raise HTTPException(status_code=404, detail="Torrent not found")
 
     # Update access time
-    torrent_info["hls_last_accessed"] = datetime.now()
+    now = datetime.now()
+    torrent_info["hls_last_accessed"] = now
+    torrent_info["last_activity_at"] = now
     client_host = request.client.host if request.client else "unknown"
     logging.info("HLS playlist requested for %s from %s start_segment=%s", torrent_id, client_host, segment)
 
@@ -1140,7 +1142,9 @@ async def download_torrent_file(torrent_id: str, file_index: int, request: Reque
     if not torrent_info:
         raise HTTPException(status_code=404, detail="Torrent not found")
 
-    torrent_info["hls_last_accessed"] = datetime.now()
+    now = datetime.now()
+    torrent_info["hls_last_accessed"] = now
+    torrent_info["last_activity_at"] = now
     client_host = request.client.host if request.client else "unknown"
     logging.info("Download requested for %s file_index=%s from %s", torrent_id, file_index, client_host)
 
@@ -1173,7 +1177,9 @@ async def notify_seek(torrent_id: str, segment: int = Query(..., ge=0)):
     async with _get_torrent_lock(torrent_info):
         await _start_hls_process(torrent_id, torrent_info, start_segment=segment)
 
-    torrent_info["hls_last_accessed"] = datetime.now()
+    now = datetime.now()
+    torrent_info["hls_last_accessed"] = now
+    torrent_info["last_activity_at"] = now
     return {"ok": True, "seek_offset_seconds": segment * HLS_SEGMENT_DURATION_SECONDS}
 
 
@@ -1228,5 +1234,7 @@ async def get_hls_segment(torrent_id: str, segment: str):
     
     # Update access time on segment access
     if torrent_id in active_torrents:
-        active_torrents[torrent_id]["hls_last_accessed"] = datetime.now()
+        now = datetime.now()
+        active_torrents[torrent_id]["hls_last_accessed"] = now
+        active_torrents[torrent_id]["last_activity_at"] = now
     return FileResponse(str(segment_path), media_type='video/MP2T')

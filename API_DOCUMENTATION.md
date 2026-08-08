@@ -360,6 +360,12 @@ DELETE /api/torrents/{torrent_id}
 }
 ```
 
+#### Retention And Auto-Delete
+
+- HLS artifacts are removed after `WARM_CACHE_TIMEOUT_MINUTES` of inactivity.
+- Torrent payloads and torrent state are removed after `INACTIVE_TORRENT_DELETE_MINUTES` of inactivity.
+- Default inactive torrent retention is `90` minutes.
+
 ### Streaming
 
 #### Get HLS Stream

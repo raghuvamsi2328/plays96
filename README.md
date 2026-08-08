@@ -110,6 +110,11 @@ The server automatically removes inactive streams:
 - `DOWNLOAD_PATH` - Path for torrent downloads
 - `HLS_PATH` - Path for HLS segments
 - `WARM_CACHE_TIMEOUT_MINUTES` - Cleanup timeout
+- `INACTIVE_TORRENT_DELETE_MINUTES` - Remove torrent files and state after inactivity (default: 90)
+
+### Retention
+- HLS artifacts are removed after `WARM_CACHE_TIMEOUT_MINUTES` of inactivity.
+- Torrent payloads and in-memory torrent state are removed after `INACTIVE_TORRENT_DELETE_MINUTES` of inactivity.
 
 ### Dependencies
 - FFmpeg for video conversion
